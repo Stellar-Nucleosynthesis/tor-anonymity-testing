@@ -3,7 +3,7 @@ import seaborn as sns
 from typing import Dict
 from pathlib import Path
 
-from src.visualization.evaluation_metrics import plot_metrics_comparison
+from src.visualization.metrics_comparison import plot_metrics_comparison
 from src.visualization.roc import plot_multiple_roc_curves, plot_roc_curve
 
 
