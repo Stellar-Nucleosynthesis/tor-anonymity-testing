@@ -16,3 +16,4 @@ ENV/
 
 build/
 dist/
+data/
