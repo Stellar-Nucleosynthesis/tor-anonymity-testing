@@ -7,9 +7,10 @@ from src.visualization.metrics_comparison import plot_metrics_comparison
 from src.visualization.roc import plot_multiple_roc_curves, plot_roc_curve
 
 
-def create_comprehensive_report(scenario_results: Dict[str, Dict],
-                                save_dir: Path,
-                                style: str = 'seaborn-v0_8-darkgrid'):
+def create_comprehensive_report(
+        scenario_results: Dict[str, Dict],
+        save_dir: Path,
+        style: str = 'seaborn-v0_8-darkgrid'):
     """
     Create comprehensive visual report.
 

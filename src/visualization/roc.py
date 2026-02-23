@@ -3,11 +3,13 @@ import numpy as np
 from typing import Dict, Optional
 from pathlib import Path
 
-def plot_roc_curve(fpr: np.ndarray,
-                   tpr: np.ndarray,
-                   auc_score: float,
-                   scenario_name: str = "Attack Scenario",
-                   save_path: Optional[Path] = None) -> plt.Figure:
+def plot_roc_curve(
+        fpr: np.ndarray,
+        tpr: np.ndarray,
+        auc_score: float,
+        scenario_name: str = "Attack Scenario",
+        save_path: Optional[Path] = None
+) -> plt.Figure:
     """
     Plot ROC curve.
 
@@ -41,8 +43,10 @@ def plot_roc_curve(fpr: np.ndarray,
     return fig
 
 
-def plot_multiple_roc_curves(scenario_results: Dict[str, Dict],
-                             save_path: Optional[Path] = None) -> plt.Figure:
+def plot_multiple_roc_curves(
+        scenario_results: Dict[str, Dict],
+        save_path: Optional[Path] = None
+) -> plt.Figure:
     """
     Plot ROC curves for multiple scenarios.
 

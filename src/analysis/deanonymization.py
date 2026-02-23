@@ -53,8 +53,10 @@ def compute_time_to_deanonymize(results: List[DeanonymizationResult]) -> Dict[st
     }
 
 
-def evaluate_attack(results: List[DeanonymizationResult],
-                    correlation_threshold: float = 0.7) -> Dict[str, any]:
+def evaluate_attack(
+        results: List[DeanonymizationResult],
+        correlation_threshold: float = 0.7
+) -> Dict[str, any]:
     """
     Comprehensive evaluation of an attack.
 
@@ -122,9 +124,11 @@ def compare_scenarios(scenario_results: Dict[str, Dict[str, any]]) -> Dict[str, 
     return comparison
 
 
-def statistical_significance(results1: List[DeanonymizationResult],
-                             results2: List[DeanonymizationResult],
-                             test: str = 'wilcoxon') -> Dict[str, float]:
+def statistical_significance(
+        results1: List[DeanonymizationResult],
+        results2: List[DeanonymizationResult],
+        test: str = 'wilcoxon'
+) -> Dict[str, float]:
     """
     Test statistical significance between two attack scenarios.
 

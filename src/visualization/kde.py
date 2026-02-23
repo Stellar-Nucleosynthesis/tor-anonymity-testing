@@ -3,11 +3,13 @@ import numpy as np
 from typing import Optional
 from pathlib import Path
 
-def plot_distribution(values: np.ndarray,
-                      title: str = "Distribution",
-                      xlabel: str = "Value",
-                      bins: int = 50,
-                      save_path: Optional[Path] = None) -> plt.Figure:
+def plot_distribution(
+        values: np.ndarray,
+        title: str = "Distribution",
+        xlabel: str = "Value",
+        bins: int = 50,
+        save_path: Optional[Path] = None
+) -> plt.Figure:
     """
     Plot histogram with KDE.
 

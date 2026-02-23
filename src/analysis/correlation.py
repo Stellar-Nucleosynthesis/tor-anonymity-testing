@@ -27,8 +27,10 @@ class TrafficProfile:
             self.metadata = {}
 
 
-def dtw_distance(profile1: TrafficProfile,
-                 profile2: TrafficProfile) -> float:
+def dtw_distance(
+        profile1: TrafficProfile,
+        profile2: TrafficProfile
+) -> float:
     """
     Compute Dynamic Time Warping distance between profiles.
 

@@ -4,9 +4,11 @@ import pandas as pd
 from typing import Dict, List, Optional
 from pathlib import Path
 
-def plot_metrics_comparison(scenario_results: Dict[str, Dict],
-                            metrics: List[str] = None,
-                            save_path: Optional[Path] = None) -> plt.Figure:
+def plot_metrics_comparison(
+        scenario_results: Dict[str, Dict],
+        metrics: List[str] = None,
+        save_path: Optional[Path] = None
+) -> plt.Figure:
     """
     Plot bar chart comparing metrics across scenarios.
 

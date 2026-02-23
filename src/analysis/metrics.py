@@ -6,8 +6,10 @@ from sklearn.metrics import (
 from typing import Dict
 
 
-def compute_basic_metrics(y_true: np.ndarray,
-                          y_pred: np.ndarray) -> Dict[str, float]:
+def compute_basic_metrics(
+        y_true: np.ndarray,
+        y_pred: np.ndarray
+) -> Dict[str, float]:
     """
     Compute basic classification metrics.
 
@@ -46,8 +48,10 @@ def compute_basic_metrics(y_true: np.ndarray,
     return metrics
 
 
-def compute_roc_metrics(y_true: np.ndarray,
-                        y_scores: np.ndarray) -> Dict[str, any]:
+def compute_roc_metrics(
+        y_true: np.ndarray,
+        y_scores: np.ndarray
+) -> Dict[str, any]:
     """
     Compute ROC curve and AUC.
 
@@ -69,8 +73,10 @@ def compute_roc_metrics(y_true: np.ndarray,
     }
 
 
-def compute_precision_recall(y_true: np.ndarray,
-                             y_scores: np.ndarray) -> Dict[str, any]:
+def compute_precision_recall(
+        y_true: np.ndarray,
+        y_scores: np.ndarray
+) -> Dict[str, any]:
     """
     Compute precision-recall curve.
 

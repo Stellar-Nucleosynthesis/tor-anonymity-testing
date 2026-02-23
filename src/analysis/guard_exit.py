@@ -1,8 +1,10 @@
 from typing import Dict, List
 
-def compute_guard_exit_deanon_probability(guard_fraction: float,
-                                        exit_fraction: float,
-                                        guard_exit_correlation: float = 1.0) -> float:
+def compute_guard_exit_deanon_probability(
+        guard_fraction: float,
+        exit_fraction: float,
+        guard_exit_correlation: float = 1.0
+) -> float:
     """
     Compute theoretical probability of deanonymization.
 
@@ -20,11 +22,13 @@ def compute_guard_exit_deanon_probability(guard_fraction: float,
     return guard_fraction * exit_fraction * guard_exit_correlation
 
 
-def compute_circuit_compromise_rate(circuits: List[Dict],
-                                    adversary_guards: List[str],
-                                    adversary_exits: List[str]) -> Dict[str, float]:
+def compute_circuit_compromise_rate(
+        circuits: List[Dict],
+        adversary_guards: List[str],
+        adversary_exits: List[str]
+) -> Dict[str, float]:
     """
-    Compute what fraction of circuits are compromised.
+    Compute what fraction of circuits is compromised.
 
     Args:
         circuits: List of circuit data

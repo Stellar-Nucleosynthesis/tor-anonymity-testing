@@ -4,10 +4,12 @@ from typing import List, Optional
 from pathlib import Path
 import plotly.graph_objects as go
 
-def plot_correlation_matrix(correlation_matrix: np.ndarray,
-                            guard_ids: Optional[List[str]] = None,
-                            exit_ids: Optional[List[str]] = None,
-                            save_path: Optional[Path] = None) -> plt.Figure:
+def plot_correlation_matrix(
+        correlation_matrix: np.ndarray,
+        guard_ids: Optional[List[str]] = None,
+        exit_ids: Optional[List[str]] = None,
+        save_path: Optional[Path] = None
+) -> plt.Figure:
     """
     Plot correlation matrix heatmap.
 
@@ -50,10 +52,12 @@ def plot_correlation_matrix(correlation_matrix: np.ndarray,
     return fig
 
 
-def plot_interactive_correlation_matrix(correlation_matrix: np.ndarray,
-                                        guard_ids: List[str],
-                                        exit_ids: List[str],
-                                        save_path: Optional[Path] = None) -> go.Figure:
+def plot_interactive_correlation_matrix(
+        correlation_matrix: np.ndarray,
+        guard_ids: List[str],
+        exit_ids: List[str],
+        save_path: Optional[Path] = None
+) -> go.Figure:
     """
     Create interactive correlation matrix using Plotly.
 

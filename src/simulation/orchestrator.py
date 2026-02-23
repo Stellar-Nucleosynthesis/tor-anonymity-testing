@@ -36,11 +36,12 @@ class SimulationOrchestrator:
         5. tornettools plot - Generate graphs (optional)
     """
 
-    def __init__(self,
-                 workspace: Path = Path("./workspace"),
-                 tornettools_cmd: str = "tornettools",
-                 tor_binary: Optional[str] = None,
-                 tor_gencert_binary: Optional[str] = None):
+    def __init__(
+            self,
+            workspace: Path = Path("./workspace"),
+            tornettools_cmd: str = "tornettools",
+            tor_binary: Optional[str] = None,
+            tor_gencert_binary: Optional[str] = None):
         """
         Initialize orchestrator.
 
@@ -62,14 +63,16 @@ class SimulationOrchestrator:
         self.staged_data_dir = self.workspace / "staged_data"
         self.staged_data_dir.mkdir(exist_ok=True)
 
-    def stage_network_data(self,
-                          consensus_dir: Path,
-                          server_desc_dir: Path,
-                          userstats_file: Path,
-                          tmodel_dir: Path,
-                          onionperf_data: Optional[Path] = None,
-                          bandwidth_data: Optional[Path] = None,
-                          geoip_path: Optional[Path] = None) -> Dict[str, Path]:
+    def stage_network_data(
+            self,
+            consensus_dir: Path,
+            server_desc_dir: Path,
+            userstats_file: Path,
+            tmodel_dir: Path,
+            onionperf_data: Optional[Path] = None,
+            bandwidth_data: Optional[Path] = None,
+            geoip_path: Optional[Path] = None
+    ) -> Dict[str, Path]:
         """
         Run tornettools stage to process Tor network data.
 
@@ -149,15 +152,17 @@ class SimulationOrchestrator:
             self.logger.error("tornettools stage timed out")
             raise
 
-    def generate_network(self,
-                        relayinfo_file: Path,
-                        userinfo_file: Path,
-                        networkinfo_file: Path,
-                        tmodel_dir: Path,
-                        network_scale: float = 0.01,
-                        prefix: str = "tornet",
-                        output_dir: Optional[Path] = None,
-                        additional_args: Optional[List[str]] = None) -> Path:
+    def generate_network(
+            self,
+            relayinfo_file: Path,
+            userinfo_file: Path,
+            networkinfo_file: Path,
+            tmodel_dir: Path,
+            network_scale: float = 0.01,
+            prefix: str = "tornet",
+            output_dir: Optional[Path] = None,
+            additional_args: Optional[List[str]] = None
+    ) -> Path:
         """
         Run tornettools generate to create Shadow network configuration.
 
@@ -235,9 +240,11 @@ class SimulationOrchestrator:
             self.logger.error("tornettools generate timed out")
             raise
 
-    def run_simulation(self,
-                      network_dir: Path,
-                      additional_args: Optional[List[str]] = None) -> Path:
+    def run_simulation(
+            self,
+            network_dir: Path,
+            additional_args: Optional[List[str]] = None
+    ) -> Path:
         """
         Run tornettools simulate to execute Shadow simulation.
 
@@ -282,9 +289,11 @@ class SimulationOrchestrator:
             self.logger.error("tornettools simulate timed out")
             raise
 
-    def parse_results(self,
-                     network_dir: Path,
-                     additional_args: Optional[List[str]] = None) -> Dict[str, Any]:
+    def parse_results(
+            self,
+            network_dir: Path,
+            additional_args: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
         """
         Run tornettools parse to process simulation results.
 
@@ -343,11 +352,13 @@ class SimulationOrchestrator:
             self.logger.error("tornettools parse timed out")
             raise
 
-    def plot_results(self,
-                    network_dir: Path,
-                    tor_metrics_path: Optional[Path] = None,
-                    prefix: str = "plots",
-                    additional_args: Optional[List[str]] = None) -> Path:
+    def plot_results(
+            self,
+            network_dir: Path,
+            tor_metrics_path: Optional[Path] = None,
+            prefix: str = "plots",
+            additional_args: Optional[List[str]] = None
+    ) -> Path:
         """
         Run tornettools plot to generate performance graphs.
 
@@ -400,9 +411,11 @@ class SimulationOrchestrator:
             self.logger.error("tornettools plot timed out")
             raise
 
-    def archive_results(self,
-                       network_dir: Path,
-                       additional_args: Optional[List[str]] = None) -> Path:
+    def archive_results(
+            self,
+            network_dir: Path,
+            additional_args: Optional[List[str]] = None
+    ) -> Path:
         """
         Run tornettools archive to package results.
 

@@ -3,10 +3,12 @@ import numpy as np
 from typing import Optional
 from pathlib import Path
 
-def plot_timeline(timestamps: np.ndarray,
-                  packet_sizes: np.ndarray,
-                  title: str = "Traffic Timeline",
-                  save_path: Optional[Path] = None) -> plt.Figure:
+def plot_timeline(
+        timestamps: np.ndarray,
+        packet_sizes: np.ndarray,
+        title: str = "Traffic Timeline",
+        save_path: Optional[Path] = None
+) -> plt.Figure:
     """
     Plot traffic timeline.
 
