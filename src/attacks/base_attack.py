@@ -313,18 +313,19 @@ class BaseAttack(abc.ABC):
 
     _TOR_CELL_BYTES: int = 512
 
-    # Compiled regexes for raw OnionTrace log lines.
-    # Format:
-    #   <unix_float> [oniontrace] <hostname> <SEVERITY> 650 CELL_STATS ID=<n> ...
-    #   <unix_float> [oniontrace] <hostname> <SEVERITY> 650 CIRC <n> BUILT <path> ...
     _RE_CELL_STATS: re.Pattern = re.compile(
-        r'^(?P<ts>\d+\.\d+)\s+\[oniontrace]\s+\S+\s+\S+\s+'
-        r'650 CELL_STATS\s+ID=(?P<cid>\d+)'
-        r'.*?\bInboundAdded=(?P<in_added>\d+)'
-        r'.*?\bOutboundAdded=(?P<out_added>\d+)'
+        r'^\S+\s+\S+\s+'
+        r'(?P<ts>\d+\.\d+)\s+'
+        r'\S+\s+\S+\s+Logger:\s+'
+        r'650 CELL_STATS\b'
+        r'(?:\s+ID=(?P<cid>\d+))?'
+        r'(?P<fields>.*)'
     )
-    _RE_CIRC_BUILT: re.Pattern = re.compile(
-        r'^(?P<ts>\d+\.\d+)\s+\[oniontrace]\s+(?P<host>\S+)\s+\S+\s+'
+    _RE_CELL_IN_REMOVED: re.Pattern = re.compile(r'\bInboundRemoved=(\S+)')
+    _RE_CELL_OUT_REMOVED: re.Pattern = re.compile(r'\bOutboundRemoved=(\S+)')
+    _RE_CIRC_BUILT = re.compile(
+        r'^\S+\s+\S+\s+(?P<ts>\d+\.\d+)\s+'
+        r'\[\S+]\s+\[\S+]\s+\S+:\s+'
         r'650 CIRC\s+(?P<cid>\d+)\s+BUILT\s+(?P<path>\S+)'
     )
 
@@ -336,8 +337,8 @@ class BaseAttack(abc.ABC):
     ) -> List[TrafficProfile]:
         """Parse raw OnionTrace logs and return one ``TrafficProfile`` per circuit per relay.
 
-        This method reads the **raw** per-host ``oniontrace.log`` files that
-        Shadow writes to ``shadow.data/hosts/<hostname>/oniontrace.log`` and
+        This method reads the **raw** per-host oniontrace log files that
+        Shadow writes to ``shadow.data/hosts/<hostname>/oniontrace.1003.stdout`` and
         extracts ``CELL_STATS`` control-port events, which give per-circuit
         cell counts at each relay hop.
 
@@ -370,7 +371,7 @@ class BaseAttack(abc.ABC):
         Args:
             shadow_hosts_dir: Path to the ``shadow.data/hosts/`` directory
                 produced by the Shadow simulator. Every subdirectory is
-                expected to contain an ``oniontrace.log`` file.
+                expected to contain an ``oniontrace.1003.stdout`` file.
             observation_point: Either ``"guard"`` or ``"exit"``. Controls
                 which ``CELL_STATS`` field is extracted and is stored in
                 each returned ``TrafficProfile``.
@@ -395,10 +396,10 @@ class BaseAttack(abc.ABC):
 
         circ_key_table: Dict[Tuple[str, str], Tuple[str, str, str]] = {}
 
-        all_log_paths = list(shadow_hosts_dir.glob("*/oniontrace.log"))
+        all_log_paths = list(shadow_hosts_dir.glob("**/oniontrace.1003.stdout"))
         if not all_log_paths:
             self.logger.warning(
-                "No oniontrace.log files found under %s. "
+                "No oniontrace log files found under %s. "
                 "Check that Shadow wrote host logs to this directory.",
                 shadow_hosts_dir,
             )
@@ -417,7 +418,7 @@ class BaseAttack(abc.ABC):
         )
         if not circ_key_table:
             self.logger.warning(
-                "No CIRC BUILT events found in any oniontrace.log. "
+                "No CIRC BUILT events found in any oniontrace log. "
                 "Verify that OnionTrace is subscribing to CIRC events."
             )
             return []
@@ -433,12 +434,13 @@ class BaseAttack(abc.ABC):
             hostname = log_path.parent.name
             if hostname not in hostname_set:
                 continue
-            for ts, cid, in_added, out_added in self._iter_cell_stats(log_path):
+            for ts, cid, in_removed, out_removed in self._iter_cell_stats(log_path):
+                if cid is None:
+                    continue
                 lookup = circ_key_table.get((hostname, cid))
                 if lookup is None:
                     continue
-
-                cells = int(in_added) if cell_field == "in_added" else int(out_added)
+                cells = in_removed if cell_field == "in_added" else out_removed
                 bytes_val = cells * self._TOR_CELL_BYTES
 
                 relay_map = accumulator.setdefault(lookup, {})
@@ -515,7 +517,7 @@ class BaseAttack(abc.ABC):
         memory, making it safe for large Shadow simulation logs.
 
         Args:
-            log_path: Path to a single ``oniontrace.log`` file.
+            log_path: Path to a single oniontrace log file.
 
         Yields:
             Tuples of ``(ts, cid, path_str)`` where ``ts`` is the raw
@@ -531,33 +533,65 @@ class BaseAttack(abc.ABC):
         except OSError as exc:
             self.logger.warning("Could not read %s: %s", log_path, exc)
 
-    def _iter_cell_stats(self, log_path: Path) -> Iterator[Tuple[str, str, str, str]]:
-        """Yield ``(timestamp, local_circuit_id, in_added, out_added)`` for every ``CELL_STATS`` event.
-
-        Iterates the raw OnionTrace log line by line without loading it into
-        memory.
+    def _iter_cell_stats(
+            self, log_path: Path
+    ) -> Iterator[Tuple[str, Optional[str], int, int]]:
+        """Yield one tuple per ``CELL_STATS`` event in a raw OnionTrace log.
 
         Args:
-            log_path: Path to a single ``oniontrace.log`` file.
+            log_path: Path to a single raw ``oniontrace.1003.stdout`` file written by
+                Shadow under ``shadow.data/hosts/<hostname>/``.
 
         Yields:
-            Tuples of ``(ts, cid, in_added, out_added)`` where all values are
-            raw strings as they appear in the log. The caller is responsible
-            for converting to numeric types.
+            Tuples of ``(ts, cid, in_removed, out_removed)`` where:
+
+            * ``ts`` — raw Unix timestamp string (sub-second precision).
+            * ``cid`` — local circuit ID string when ``ID=`` is present,
+              ``None`` otherwise.
+            * ``in_removed`` — total inbound cells removed from the queue.
+            * ``out_removed`` — total outbound cells removed from the queue.
         """
         try:
             with log_path.open(errors="replace") as fh:
                 for line in fh:
                     m = self._RE_CELL_STATS.match(line)
-                    if m:
-                        yield (
-                            m.group("ts"),
-                            m.group("cid"),
-                            m.group("in_added"),
-                            m.group("out_added"),
-                        )
+                    if not m:
+                        continue
+                    fields = m.group("fields")
+                    mi = self._RE_CELL_IN_REMOVED.search(fields)
+                    mo = self._RE_CELL_OUT_REMOVED.search(fields)
+                    yield (
+                        m.group("ts"),
+                        m.group("cid"),
+                        self._parse_cells(mi.group(1)) if mi else 0,
+                        self._parse_cells(mo.group(1)) if mo else 0,
+                    )
         except OSError as exc:
             self.logger.warning("Could not read %s: %s", log_path, exc)
+
+    @staticmethod
+    def _parse_cells(value: str) -> int:
+        """Sum all ``type:count`` pairs in a ``CELL_STATS`` ``CellsByType`` field.
+
+        Tor encodes cell counts as a comma-separated list of ``CellType:Count``
+        pairs, e.g. ``"relay:33,relay_early:3"``. All cell types are summed
+        because every type carries one Tor cell of exactly 512 bytes.
+
+        Args:
+            value: The raw field value string, e.g. ``"relay:6"`` or
+                ``"relay:33,relay_early:3"``.
+
+        Returns:
+            Total number of cells as an integer. Returns 0 for malformed input.
+        """
+        total = 0
+        for part in value.split(','):
+            if ':' in part:
+                try:
+                    total += int(part.split(':')[1])
+                except (ValueError, IndexError):
+                    pass
+        return total
 
     @staticmethod
     def _canonical_circuit_key(path_str: str,) -> Optional[Tuple[str, str, str]]:
