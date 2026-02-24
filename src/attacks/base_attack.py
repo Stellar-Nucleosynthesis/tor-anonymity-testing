@@ -1,11 +1,11 @@
 import abc
 import dataclasses
-import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -157,7 +157,7 @@ class BaseAttack(abc.ABC):
             and return a list of ``DeanonymizationResult`` objects.
         _build_adversary_relay_list: Return relay fingerprints the adversary
             controls, derived from network topology or tornettools staging data.
-        _load_profiles_from_oniontrace: Optionally override if the default log
+        _load_profiles_from_cell_stats: Override if the default CELL_STATS
             parser does not cover the scenario's observation points.
 
     Attributes:
@@ -201,9 +201,9 @@ class BaseAttack(abc.ABC):
             **kwargs: Arbitrary keyword arguments stored in ``config.extra``.
         """
         self.config.extra.update(kwargs)
-        self.logger.debug(F"{self.ATTACK_NAME}.configure() called with %s", kwargs)
+        self.logger.debug(f"{self.ATTACK_NAME}.configure() called with %s", kwargs)
 
-    def run(self, simulation_dirs: List[Path], *, label: str = "",) -> AttackResult:
+    def run(self, simulation_dirs: List[Path], *, label: str = "") -> AttackResult:
         """Execute the attack across all provided simulation output directories.
 
         Each directory must correspond to one seed run produced by
@@ -295,7 +295,7 @@ class BaseAttack(abc.ABC):
 
     @abc.abstractmethod
     def _build_adversary_relay_list(
-            self, network_data: Dict[str, Any]
+        self, network_data: Dict[str, Any]
     ) -> Tuple[List[str], List[str], List[str]]:
         """Derive adversary-controlled relay IDs from network topology data.
 
@@ -311,103 +311,283 @@ class BaseAttack(abc.ABC):
         """
 
 
-    def _load_profiles_from_oniontrace(
-        self,
-        oniontrace_log: Path,
-        observation_point: str,
-        relay_filter: Optional[List[str]] = None,
-    ) -> List[TrafficProfile]:
-        """Parse an OnionTrace log and return ``TrafficProfile`` objects.
+    _TOR_CELL_BYTES: int = 512
 
-        Handles both a single-document JSON file and a JSON-lines file, as
-        produced by ``tornettools parse``. Override this method to support
-        custom log formats.
+    # Compiled regexes for raw OnionTrace log lines.
+    # Format:
+    #   <unix_float> [oniontrace] <hostname> <SEVERITY> 650 CELL_STATS ID=<n> ...
+    #   <unix_float> [oniontrace] <hostname> <SEVERITY> 650 CIRC <n> BUILT <path> ...
+    _RE_CELL_STATS: re.Pattern = re.compile(
+        r'^(?P<ts>\d+\.\d+)\s+\[oniontrace]\s+\S+\s+\S+\s+'
+        r'650 CELL_STATS\s+ID=(?P<cid>\d+)'
+        r'.*?\bInboundAdded=(?P<in_added>\d+)'
+        r'.*?\bOutboundAdded=(?P<out_added>\d+)'
+    )
+    _RE_CIRC_BUILT: re.Pattern = re.compile(
+        r'^(?P<ts>\d+\.\d+)\s+\[oniontrace]\s+(?P<host>\S+)\s+\S+\s+'
+        r'650 CIRC\s+(?P<cid>\d+)\s+BUILT\s+(?P<path>\S+)'
+    )
+
+    def _load_profiles_from_cell_stats(
+        self,
+        shadow_hosts_dir: Path,
+        observation_point: str,
+        relay_hostnames: List[str],
+    ) -> List[TrafficProfile]:
+        """Parse raw OnionTrace logs and return one ``TrafficProfile`` per circuit per relay.
+
+        This method reads the **raw** per-host ``oniontrace.log`` files that
+        Shadow writes to ``shadow.data/hosts/<hostname>/oniontrace.log`` and
+        extracts ``CELL_STATS`` control-port events, which give per-circuit
+        cell counts at each relay hop.
+
+        **Cell-to-byte conversion**
+
+        Tor cells are fixed at 512 bytes (Tor spec §0.1). ``CELL_STATS``
+        reports cell counts, so ``bytes = InboundAdded × 512`` (guard) or
+        ``bytes = OutboundAdded × 512`` (exit).
+
+        **Circuit identity**
+
+        Circuit IDs in ``CELL_STATS`` are relay-local integers; the same
+        integer may refer to different circuits on different relays. ``CIRC
+        BUILT`` events in the same log files carry the full three-hop path
+        as ``$FP~nickname`` triples, which are identical on every relay in
+        the circuit. The canonical circuit key is therefore the fingerprint
+        tuple ``(guard_fp, middle_fp, exit_fp)`` derived from ``CIRC BUILT``.
+
+        **Two-pass algorithm**
+
+        Pass 1 — read ``CIRC BUILT`` events from every relay log in
+        ``shadow_hosts_dir``. Build a table mapping
+        ``(hostname, local_circuit_id)`` → canonical circuit key.
+
+        Pass 2 — read ``CELL_STATS`` events only from the logs of
+        ``relay_hostnames``. Accumulate cell counts into a
+        ``{canonical_key: {timestamp: cells}}`` dict, then convert to
+        ``TrafficProfile`` objects.
 
         Args:
-            oniontrace_log: Path to a parsed OnionTrace stats file. Accepted
-                formats are JSON (list or dict with a ``"circuits"`` key) and
-                newline-delimited JSON.
-            observation_point: Label attached to each returned profile, e.g.
-                ``"guard"`` or ``"exit"``, used downstream for correlation.
-            relay_filter: If provided, only circuits whose relevant relay
-                fingerprint (guard fingerprint when ``observation_point`` is
-                ``"guard"``, exit fingerprint otherwise) appears in this list
-                are included.
+            shadow_hosts_dir: Path to the ``shadow.data/hosts/`` directory
+                produced by the Shadow simulator. Every subdirectory is
+                expected to contain an ``oniontrace.log`` file.
+            observation_point: Either ``"guard"`` or ``"exit"``. Controls
+                which ``CELL_STATS`` field is extracted and is stored in
+                each returned ``TrafficProfile``.
+            relay_hostnames: Shadow hostnames of the adversary relays to
+                include, e.g. ``["relay1", "relay3"]``. Only logs
+                from these hosts are read in pass 2.
 
         Returns:
-            A list of ``TrafficProfile`` objects parsed from the log. Returns
-            an empty list if the file does not exist or contains no matching
-            circuits.
+            A list of ``TrafficProfile`` objects. Each profile represents
+            one circuit observed at one adversary relay, identified by its
+            canonical ``(guard_fp, middle_fp, exit_fp)`` key stored in
+            ``circuit_id``. Returns an empty list when no ``CELL_STATS``
+            events are found or no logs exist.
+
+        Raises:
+            FileNotFoundError: If ``shadow_hosts_dir`` does not exist.
         """
-        profiles: List[TrafficProfile] = []
+        if not shadow_hosts_dir.is_dir():
+            raise FileNotFoundError(f"shadow_hosts_dir not found: {shadow_hosts_dir}")
 
-        if not oniontrace_log.exists():
-            self.logger.warning("OnionTrace log not found: %s", oniontrace_log)
-            return profiles
+        cell_field = ("in_added" if observation_point == "guard" else "out_added")
 
-        try:
-            with oniontrace_log.open() as fh:
-                raw = json.load(fh)
-        except json.JSONDecodeError:
-            raw = []
-            with oniontrace_log.open() as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line:
-                        try:
-                            raw.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            continue
+        circ_key_table: Dict[Tuple[str, str], Tuple[str, str, str]] = {}
 
-        circuits = raw if isinstance(raw, list) else raw.get("circuits", [])
+        all_log_paths = list(shadow_hosts_dir.glob("*/oniontrace.log"))
+        if not all_log_paths:
+            self.logger.warning(
+                "No oniontrace.log files found under %s. "
+                "Check that Shadow wrote host logs to this directory.",
+                shadow_hosts_dir,
+            )
+            return []
 
-        for circ in circuits:
-            cid = str(circ.get("circuit_id", "unknown"))
-            guard = circ.get("guard", "")
-            exit_relay = circ.get("exit", "")
+        for log_path in all_log_paths:
+            hostname = log_path.parent.name
+            for ts, cid, path_str in self._iter_circ_built(log_path):
+                key = self._canonical_circuit_key(path_str)
+                if key is not None:
+                    circ_key_table[(hostname, cid)] = key
+        self.logger.debug(
+            "Pass 1 complete: %d (host, cid) → canonical-key entries from %d log files.",
+            len(circ_key_table),
+            len(all_log_paths),
+        )
+        if not circ_key_table:
+            self.logger.warning(
+                "No CIRC BUILT events found in any oniontrace.log. "
+                "Verify that OnionTrace is subscribing to CIRC events."
+            )
+            return []
 
-            if relay_filter:
-                relevant = guard if observation_point == "guard" else exit_relay
-                if relevant not in relay_filter:
+        accumulator: Dict[
+            Tuple[str, str, str],
+            Dict[str, Dict[float, int]],
+        ] = {}
+        hostname_set = set(relay_hostnames)
+        cell_stats_seen = 0
+
+        for log_path in all_log_paths:
+            hostname = log_path.parent.name
+            if hostname not in hostname_set:
+                continue
+            for ts, cid, in_added, out_added in self._iter_cell_stats(log_path):
+                lookup = circ_key_table.get((hostname, cid))
+                if lookup is None:
                     continue
 
-            packets = circ.get("packets", [])
-            if not packets:
-                continue
+                cells = int(in_added) if cell_field == "in_added" else int(out_added)
+                bytes_val = cells * self._TOR_CELL_BYTES
 
-            timestamps = np.array([p.get("t", 0.0) for p in packets])
-            sizes = np.array([p.get("size", 0) for p in packets])
-
-            if len(timestamps) == 0:
-                continue
-
-            profiles.append(
-                TrafficProfile(
-                    circuit_id=cid,
-                    timestamps=timestamps,
-                    packet_sizes=sizes,
-                    byte_counts=np.cumsum(sizes),
-                    packet_counts=np.arange(1, len(sizes) + 1, dtype=float),
-                    first_packet_time=float(timestamps[0]),
-                    last_packet_time=float(timestamps[-1]),
-                    total_bytes=int(sizes.sum()),
-                    total_packets=len(sizes),
-                    observation_point=observation_point,
-                    metadata={
-                        "guard": guard,
-                        "exit": exit_relay,
-                        "circuit_id": cid,
-                    },
-                )
-            )
+                relay_map = accumulator.setdefault(lookup, {})
+                ts_map = relay_map.setdefault(hostname, {})
+                ts_bucket = float(int(float(ts)))
+                ts_map[ts_bucket] = ts_map.get(ts_bucket, 0) + bytes_val
+                cell_stats_seen += 1
 
         self.logger.debug(
-            "Loaded %d profiles from %s (point=%s)",
+            "Pass 2 complete: %d CELL_STATS events across %d adversary relay(s).",
+            cell_stats_seen,
+            len(hostname_set),
+        )
+        if cell_stats_seen == 0:
+            self.logger.warning(
+                "No CELL_STATS events found in adversary relay logs. "
+                "Ensure 'TestingEnableCellStatsEvent 1' is set in the Tor "
+                "configuration used by the simulation (see configuration guide)."
+            )
+            return []
+
+        profiles: List[TrafficProfile] = []
+
+        for canon_key, relay_map in accumulator.items():
+            guard_fp, middle_fp, exit_fp = canon_key
+            circuit_label = f"{guard_fp[:8]}..{exit_fp[:8]}"
+
+            for relay_host, ts_map in relay_map.items():
+                if not ts_map:
+                    continue
+
+                pairs = sorted(ts_map.items())
+                timestamps  = np.array([p[0] for p in pairs], dtype=float)
+                byte_vals   = np.array([p[1] for p in pairs], dtype=float)
+                cumulative  = np.cumsum(byte_vals)
+
+                profiles.append(
+                    TrafficProfile(
+                        circuit_id=circuit_label,
+                        timestamps=timestamps,
+                        packet_sizes=byte_vals,
+                        byte_counts=cumulative,
+                        packet_counts=np.arange(
+                            1, len(byte_vals) + 1, dtype=float
+                        ),
+                        first_packet_time=float(timestamps[0]),
+                        last_packet_time=float(timestamps[-1]),
+                        total_bytes=int(cumulative[-1]),
+                        total_packets=len(byte_vals),
+                        observation_point=observation_point,
+                        metadata={
+                            "guard_fp":    guard_fp,
+                            "middle_fp":   middle_fp,
+                            "exit_fp":     exit_fp,
+                            "relay_host":  relay_host,
+                            "cell_field":  cell_field,
+                            "canon_key":   canon_key,
+                        },
+                    )
+                )
+
+        self.logger.debug(
+            "Built %d TrafficProfile(s) for observation_point='%s'.",
             len(profiles),
-            oniontrace_log.name,
             observation_point,
         )
         return profiles
+
+
+    def _iter_circ_built(self, log_path: Path) -> Iterator[Tuple[str, str, str]]:
+        """Yield ``(timestamp, local_circuit_id, path_string)`` for every ``CIRC BUILT`` event.
+
+        Iterates the raw OnionTrace log line by line without loading it into
+        memory, making it safe for large Shadow simulation logs.
+
+        Args:
+            log_path: Path to a single ``oniontrace.log`` file.
+
+        Yields:
+            Tuples of ``(ts, cid, path_str)`` where ``ts`` is the raw
+            timestamp string, ``cid`` is the local circuit ID string, and
+            ``path_str`` is the ``$FP~nick,...`` path field verbatim.
+        """
+        try:
+            with log_path.open(errors="replace") as fh:
+                for line in fh:
+                    m = self._RE_CIRC_BUILT.match(line)
+                    if m:
+                        yield m.group("ts"), m.group("cid"), m.group("path")
+        except OSError as exc:
+            self.logger.warning("Could not read %s: %s", log_path, exc)
+
+    def _iter_cell_stats(self, log_path: Path) -> Iterator[Tuple[str, str, str, str]]:
+        """Yield ``(timestamp, local_circuit_id, in_added, out_added)`` for every ``CELL_STATS`` event.
+
+        Iterates the raw OnionTrace log line by line without loading it into
+        memory.
+
+        Args:
+            log_path: Path to a single ``oniontrace.log`` file.
+
+        Yields:
+            Tuples of ``(ts, cid, in_added, out_added)`` where all values are
+            raw strings as they appear in the log. The caller is responsible
+            for converting to numeric types.
+        """
+        try:
+            with log_path.open(errors="replace") as fh:
+                for line in fh:
+                    m = self._RE_CELL_STATS.match(line)
+                    if m:
+                        yield (
+                            m.group("ts"),
+                            m.group("cid"),
+                            m.group("in_added"),
+                            m.group("out_added"),
+                        )
+        except OSError as exc:
+            self.logger.warning("Could not read %s: %s", log_path, exc)
+
+    @staticmethod
+    def _canonical_circuit_key(path_str: str,) -> Optional[Tuple[str, str, str]]:
+        """Parse a ``CIRC BUILT`` path string into a canonical three-hop fingerprint tuple.
+
+        The path field in a ``CIRC BUILT`` event has the form::
+
+            $FP1~nickname1,$FP2~nickname2,$FP3~nickname3
+
+        The tuple ``(guard_fp, middle_fp, exit_fp)`` is identical on every
+        relay that is part of the circuit and therefore serves as a globally
+        unique circuit identifier across all relay logs.
+
+        Args:
+            path_str: The raw path field from a ``CIRC BUILT`` log line,
+                e.g. ``"$AABB~relay1,$AACC~relay2,$AADD~relay3"``.
+
+        Returns:
+            A three-element tuple of uppercase hex fingerprint strings, or
+            ``None`` when the path does not contain exactly three hops (e.g.
+            for two-hop directory circuits or malformed lines).
+        """
+        hops = path_str.split(",")
+        if len(hops) != 3:
+            return None
+        fps = []
+        for hop in hops:
+            fp_part = hop.split("~")[0].lstrip("$")
+            fps.append(fp_part.upper())
+        return fps[0], fps[1], fps[2]
 
     def _correlate_and_decide(
         self,
