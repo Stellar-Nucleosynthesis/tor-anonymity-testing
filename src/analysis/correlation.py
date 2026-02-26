@@ -144,7 +144,7 @@ def cross_correlation(profile1: TrafficProfile,
     correlation = signal.correlate(bins1, bins2, mode='full')
 
     if normalize:
-        norm = np.sqrt(np.sum(bins1 ** 2).prod(np.sum(bins2 ** 2)))
+        norm = np.sqrt(np.sum(bins1 ** 2) * np.sum(bins2 ** 2))
         if norm > 0:
             correlation = correlation / norm
 

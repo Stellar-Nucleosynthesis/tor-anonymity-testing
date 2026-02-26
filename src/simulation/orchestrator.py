@@ -202,7 +202,7 @@ class SimulationOrchestrator:
             str(tmodel_dir),
             '--network_scale', str(network_scale),
             '--prefix', str(output_dir / prefix),
-            '--events', "CIRC,BW,CELL_STATS"
+            '--events', "CIRC,CIRC_BW"
         ]
 
         if additional_args:
@@ -218,9 +218,6 @@ class SimulationOrchestrator:
                 text=True,
                 timeout=3600
             )
-
-            torrc_path = output_dir / prefix / Path("conf/tor.common.torrc")
-            self.enable_cell_stats(torrc_path)
 
             self.logger.info("tornettools generate completed successfully")
             if result.stdout:
@@ -546,7 +543,7 @@ class SimulationOrchestrator:
         self.logger.info("✓ Network generation completed")
 
         self.logger.info("Step 3/5: Running Shadow simulation...")
-        self.run_simulation(network_dir)
+        self.run_simulation(network_dir, ['--args', "--stop-time 3600"])
         results['simulation_completed'] = True
         results['pipeline_steps'].append('simulate')
         self.logger.info("✓ Simulation completed")
@@ -576,26 +573,6 @@ class SimulationOrchestrator:
         self.logger.info(f"✓ Complete pipeline finished: {network_dir}")
         self.logger.info(f"Completed steps: {' → '.join(results['pipeline_steps'])}")
         return results
-
-    def enable_cell_stats(self, torrc_path: Path):
-        """Set TestingEnableCellStatsEvent to 1 in a torrc file"""
-        with open(torrc_path, 'r+') as file:
-            lines = file.readlines()
-            for i, line in enumerate(lines):
-                if line.startswith("TestingEnableCellStatsEvent"):
-                    lines[i] = line.replace(
-                        "TestingEnableCellStatsEvent 0",
-                        "TestingEnableCellStatsEvent 1",
-                        1
-                    )
-                    self.logger.info(f"Setting TestingEnableCellStatsEvent to 1 in {torrc_path}...")
-                    file.seek(0)
-                    file.writelines(lines)
-                    file.truncate()
-                    return
-
-        self.logger.error(f"Failed to set TestingEnableCellStatsEvent to 1 in {torrc_path}")
-        raise AttributeError(f"TestingEnableCellStatsEvent not found in {torrc_path}")
 
 
 def check_tornettools_installation():

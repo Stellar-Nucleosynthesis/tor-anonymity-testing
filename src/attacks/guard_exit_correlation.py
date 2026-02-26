@@ -1,11 +1,11 @@
 import base64
 import binascii
-import dataclasses
 import logging
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -37,40 +37,12 @@ class GuardExitConfig(AttackConfig):
         require_top_rank: When ``True``, deanonymization is declared successful
             only when the correct pair is the top-ranked candidate. When
             ``False``, any candidate whose score exceeds the threshold counts.
-        consensus_dir: Path to a directory of Tor consensus files in CollecTor
-            format (e.g. ``consensuses-2023-04/``). Used to derive which relays
-            carry the Guard and Exit flags. When ``None`` the attack tries to
-            locate a consensus directory automatically adjacent to the
-            simulation workspace.
     """
 
     max_time_lag: float = 5.0
     bin_size: float = 0.1
     use_all_methods: bool = True
     require_top_rank: bool = True
-    consensus_dir: Optional[Path] = None
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "GuardExitConfig":
-        """Construct a ``GuardExitConfig`` from a plain dictionary.
-
-        Known field names are mapped to dataclass fields; any remaining keys
-        are collected into ``extra``. String values for ``consensus_dir`` are
-        automatically converted to ``Path`` objects.
-
-        Args:
-            d: Dictionary of configuration values, typically loaded from a
-                YAML scenario file.
-
-        Returns:
-            A fully populated ``GuardExitConfig`` instance.
-        """
-        known = {f.name for f in dataclasses.fields(cls)}
-        base = {k: v for k, v in d.items() if k in known and k != "extra"}
-        extra = {k: v for k, v in d.items() if k not in known}
-        if "consensus_dir" in base and base["consensus_dir"] is not None:
-            base["consensus_dir"] = Path(base["consensus_dir"])
-        return cls(**base, extra=extra)
 
 
 class GuardExitAttack(BaseAttack):
@@ -87,10 +59,14 @@ class GuardExitAttack(BaseAttack):
         ge_config: Typed reference to the ``GuardExitConfig`` passed at
             construction.
         synthetic: When ``True``, synthetic results are generated when no
-            OnionTrace log is found instead of skipping the seed.
+            Shadow host directory is found instead of skipping the seed.
     """
 
     ATTACK_NAME = "guard_exit_correlation"
+
+    _RE_CIRC_BUILT: re.Pattern = re.compile(
+        r'650 CIRC\s+(?P<cid>\d+)\s+BUILT\s+(?P<path>\S+)'
+    )
 
     def __init__(
         self,
@@ -107,7 +83,7 @@ class GuardExitAttack(BaseAttack):
             config: Guard+Exit-specific scenario configuration.
             workspace: Root directory for intermediate files. Defaults to
                 ``./workspace``.
-            synthetic: When ``True``, missing OnionTrace logs trigger
+            synthetic: When ``True``, missing Shadow host directories trigger
                 synthetic result generation instead of an empty return.
         """
         if "cross_correlation" not in config.correlation_methods:
@@ -120,34 +96,9 @@ class GuardExitAttack(BaseAttack):
         self._adversary_guards: List[str] = []
         self._adversary_exits: List[str] = []
 
-
-    def configure(self, **kwargs: Any) -> None:
-        """Preload adversary relay lists and apply extra configuration.
-
-        If ``consensus_dir`` is provided (either via ``kwargs`` or
-        ``ge_config.consensus_dir``), consensus files are parsed and a random
-        subset of relays is marked as adversary-controlled according to the
-        configured fractions. Call this before ``run``.
-
-        Args:
-            **kwargs: Keyword arguments forwarded to ``AttackConfig.extra``.
-                Recognizes ``consensus_dir`` (str or Path) to override the
-                config-level path.
-        """
-        super().configure(**kwargs)
-
-        consensus_dir = kwargs.get("consensus_dir", self.ge_config.consensus_dir)
-        if consensus_dir:
-            consensus_dir = Path(consensus_dir)
-            if consensus_dir.exists():
-                self._load_adversary_relays_from_consensus(consensus_dir)
-            else:
-                self.logger.warning(
-                    "consensus_dir does not exist: %s", consensus_dir
-                )
-
     def _build_adversary_relay_list(
-        self, network_data: Dict[str, Any]
+        self,
+        network_data: Dict[str, Any]
     ) -> Tuple[List[str], List[str], List[str]]:
         """Partition relays by role and select the adversary subset.
 
@@ -187,9 +138,15 @@ class GuardExitAttack(BaseAttack):
             and "Exit" not in meta.get("flags", [])
         ]
 
-        adv_guards = self._select_adversary_relays(guards, self.config.adversary_guard_fraction, rng)
-        adv_exits = self._select_adversary_relays(exits, self.config.adversary_exit_fraction, rng)
-        adv_middles = self._select_adversary_relays(middles, self.config.adversary_middle_fraction, rng)
+        adv_guards = self._select_adversary_relays(
+            guards, self.config.adversary_guard_fraction, rng
+        )
+        adv_exits = self._select_adversary_relays(
+            exits, self.config.adversary_exit_fraction, rng
+        )
+        adv_middles = self._select_adversary_relays(
+            middles, self.config.adversary_middle_fraction, rng
+        )
 
         self.logger.info(
             "Adversary relays — guards: %d/%d, exits: %d/%d, middles: %d/%d",
@@ -200,7 +157,7 @@ class GuardExitAttack(BaseAttack):
         return adv_guards, adv_middles, adv_exits
 
     def _run_single_seed(self, sim_dir: Path, *, seed: int) -> List[DeanonymizationResult]:
-        """Analyze one seed's Oniontrace/Shadow output.
+        """Analyze one seed's Shadow/OnionTrace output.
 
         Expected directory layout produced by ``tornettools simulate``::
 
@@ -208,26 +165,34 @@ class GuardExitAttack(BaseAttack):
                 tornet/
                     shadow.data/
                         hosts/
-
+                            relayguard1/
+                                oniontrace.1001.oniontrace.log
+                            relayexit1/
+                                oniontrace.1001.oniontrace.log
+                            ...
 
         The method:
-            1. Locates the Oniontrace log in Shadow directory (falls back to
-               synthetic data if ``self.synthetic`` is ``True`` and no log is found).
+            1. Locates ``shadow.data/hosts/`` under ``sim_dir`` (falls back to
+               synthetic data if ``self.synthetic`` is ``True`` and no
+               directory is found).
             2. Ensures adversary relay lists are populated, auto-discovering
                a consensus directory if needed.
-            3. Extracts guard and exit ``TrafficProfile`` objects filtered to
-               adversary-controlled relays.
-            4. Cross-correlates all guard × exit candidate pairs.
-            5. Logs circuit-level compromise statistics.
+            3. Extracts guard and exit ``TrafficProfile`` objects from
+               ``CIRC_BW`` events in adversary relay logs.
+            4. Builds ground truth from ``CIRC BUILT`` events across all
+               relay logs.
+            5. Cross-correlates all guard × exit candidate pairs.
+            6. Logs circuit-level compromise statistics.
 
         Args:
-            sim_dir: Path to the tornettools/Shadow output directory for this seed.
+            sim_dir: Path to the tornettools/Shadow output directory for this
+                seed.
             seed: Zero-based seed index for logging and reproducibility.
 
         Returns:
             A list of ``DeanonymizationResult`` objects, one per guard profile
             processed. Returns synthetic results when ``self.synthetic`` is
-            ``True`` and no log file is found.
+            ``True`` and no Shadow host directory is found.
         """
         self.logger.info("Analyzing seed=%d  dir=%s", seed, sim_dir)
 
@@ -236,22 +201,23 @@ class GuardExitAttack(BaseAttack):
             if self.synthetic:
                 return self._generate_synthetic_results(seed)
             self.logger.warning(
-                "No shadow.data directory found in %s — skipping seed.", sim_dir
+                "No shadow.data/hosts directory found in %s — skipping seed.",
+                sim_dir,
             )
             return []
 
         if not self._adversary_guards or not self._adversary_exits:
-            self._auto_load_adversary_relays(sim_dir)
+            self._load_adversary_relays_from_hosts(hosts_dir, logger)
 
-        guard_profiles = self._load_profiles_from_cell_stats(
+        guard_profiles = self._load_profiles_from_oniontrace(
             hosts_dir,
             observation_point="guard",
-            relay_hostnames=self._adversary_guards
+            relay_filter=self._adversary_guards,
         )
-        exit_profiles = self._load_profiles_from_cell_stats(
+        exit_profiles = self._load_profiles_from_oniontrace(
             hosts_dir,
             observation_point="exit",
-            relay_hostnames=self._adversary_exits
+            relay_filter=self._adversary_exits,
         )
 
         if not guard_profiles or not exit_profiles:
@@ -269,10 +235,7 @@ class GuardExitAttack(BaseAttack):
             guard_profiles, exit_profiles, ground_truth, seed=seed
         )
 
-        circuits_for_stats = [
-            {"guard": gt["guard"], "exit": gt["exit"]}
-            for gt in ground_truth.values()
-        ]
+        circuits_for_stats = list(ground_truth.values())
         if circuits_for_stats:
             stats = compute_circuit_compromise_rate(
                 circuits_for_stats,
@@ -291,6 +254,204 @@ class GuardExitAttack(BaseAttack):
                 self.config.adversary_exit_fraction,
             )
             self.logger.debug("Theoretical deanon prob: %.4f", theoretical)
+
+        return results
+
+    def _build_ground_truth(self, hosts_dir: Path) -> Dict[str, Dict[str, str]]:
+        """Build a ``"hostname/local_cid"`` → relay-fingerprint mapping.
+
+        Iterates every OnionTrace log under ``hosts_dir`` and extracts
+        ``CIRC BUILT`` events.  Because every relay that is part of a circuit
+        logs the same three-hop fingerprint path, the first occurrence of each
+        ``(hostname, local_cid)`` pair is sufficient.
+
+        The resulting dict is keyed by ``"hostname/local_cid"``, which is
+        exactly the ``circuit_id`` format used by
+        ``_load_profiles_from_oniontrace`` (inherited from ``BaseAttack``).
+        This means ``ground_truth.get(profile.circuit_id)`` resolves without
+        any additional lookup step.
+
+        Args:
+            hosts_dir: Path to the ``shadow.data/hosts/`` directory whose
+                subdirectories each contain an OnionTrace log.
+
+        Returns:
+            A dict mapping ``"hostname/local_cid"`` strings to inner dicts
+            with keys ``"guard"``, ``"middle"``, and ``"exit"``, each holding
+            a full uppercase hex fingerprint string.  Returns an empty dict
+            when no ``CIRC BUILT`` events are found.
+        """
+        ground_truth: Dict[str, Dict[str, str]] = {}
+
+        for host_dir in sorted(hosts_dir.iterdir()):
+            if not host_dir.is_dir():
+                continue
+            log_path = self._find_relay_oniontrace_log(host_dir)
+            if log_path is None:
+                continue
+
+            for local_cid, path_str in self._iter_circ_built(log_path):
+                key = f"{host_dir.name}/{local_cid}"
+                if key in ground_truth:
+                    continue
+                parsed = self._parse_circ_path(path_str)
+                if parsed is not None:
+                    guard_fp, middle_fp, exit_fp = parsed
+                    ground_truth[key] = {
+                        "guard":  guard_fp,
+                        "middle": middle_fp,
+                        "exit":   exit_fp,
+                    }
+
+        self.logger.debug(
+            "Built ground truth for %d (hostname, cid) entries from %s.",
+            len(ground_truth),
+            hosts_dir,
+        )
+        return ground_truth
+
+    def _iter_circ_built(self, log_path: Path) -> Iterator[Tuple[str, str]]:
+        """Yield ``(local_circuit_id, path_string)`` for every ``CIRC BUILT`` event.
+
+        Iterates the log line-by-line without loading it into memory.
+
+        Args:
+            log_path: Path to a single OnionTrace log file.
+
+        Yields:
+            Tuples of ``(local_cid, path_str)`` where ``local_cid`` is the
+            Tor-process-local circuit ID string and ``path_str`` is the raw
+            ``$FP~nickname,...`` path field from the event.
+        """
+        try:
+            with log_path.open(errors="replace") as fh:
+                for line in fh:
+                    m = self._RE_CIRC_BUILT.search(line)
+                    if m:
+                        yield m.group("cid"), m.group("path")
+        except OSError as exc:
+            self.logger.warning("Could not read %s: %s", log_path, exc)
+
+    @staticmethod
+    def _parse_circ_path(path_str: str,) -> Optional[Tuple[str, str, str]]:
+        """Parse a ``CIRC BUILT`` path string into a fingerprint triple.
+
+        The path field has the form::
+
+            $FP1~nickname1,$FP2~nickname2,$FP3~nickname3
+
+        Args:
+            path_str: The raw path field from a ``CIRC BUILT`` log line.
+
+        Returns:
+            A tuple of ``(guard_fp, middle_fp, exit_fp)`` uppercase hex
+            strings, or ``None`` when the path does not contain exactly three
+            hops (e.g. two-hop directory circuits or malformed lines).
+        """
+        hops = path_str.split(",")
+        if len(hops) != 3:
+            return None
+        fps = [hop.split("~")[0].lstrip("$").upper() for hop in hops]
+        return fps[0], fps[1], fps[2]
+
+
+    def _correlate_all_pairs(
+        self,
+        guard_profiles: List[TrafficProfile],
+        exit_profiles: List[TrafficProfile],
+        ground_truth: Dict[str, Dict[str, str]],
+        seed: int,
+    ) -> List[DeanonymizationResult]:
+        """Cross-correlate every guard–exit profile pair and produce results.
+
+        For each guard profile:
+            1. Scores all candidate exit profiles using ``_correlate_and_decide``.
+            2. Ranks candidates by descending score.
+            3. Resolves both the guard profile and the best-ranked exit profile
+               to their canonical circuit fingerprints via ``ground_truth``.
+            4. Declares the match successful when both profiles resolve to the
+               same canonical circuit and the score meets the threshold
+               (and, if ``require_top_rank`` is ``True``, the best-ranked
+               candidate is the one that matches).
+
+        Guard and exit profile ``circuit_id`` values are scoped strings of the
+        form ``"hostname/local_cid"`` and are never directly comparable across
+        relays.  Success is determined entirely by canonical fingerprint
+        equality, not by ``circuit_id`` equality.
+
+        Args:
+            guard_profiles: Traffic profiles observed at adversary guard relays,
+                as returned by ``_load_profiles_from_oniontrace``.
+            exit_profiles: Traffic profiles observed at adversary exit relays,
+                as returned by ``_load_profiles_from_oniontrace``.
+            ground_truth: Mapping of ``"hostname/local_cid"`` to relay
+                fingerprint dicts, as returned by ``_build_ground_truth``.
+            seed: Seed index embedded in ``DeanonymizationResult.client_id``
+                for traceability.
+
+        Returns:
+            A list of ``DeanonymizationResult`` objects, one per guard profile
+            that had at least one candidate exit profile to compare against.
+        """
+        results: List[DeanonymizationResult] = []
+        threshold = self.config.correlation_thresholds.get("cross_correlation", 0.7)
+
+        for g_prof in guard_profiles:
+            t_start = time.perf_counter()
+            g_canon = ground_truth.get(g_prof.circuit_id)
+
+            true_guard = (g_canon or {}).get("guard", "unknown")
+            true_exit  = (g_canon or {}).get("exit",  "unknown")
+
+            candidate_scores: List[Tuple[str, float]] = []
+            for e_prof in exit_profiles:
+                score, _ = self._correlate_and_decide(g_prof, e_prof)
+                candidate_scores.append((e_prof.circuit_id, score))
+
+            if not candidate_scores:
+                continue
+
+            candidate_scores.sort(key=lambda x: x[1], reverse=True)
+            best_cid, best_score = candidate_scores[0]
+
+            best_canon = ground_truth.get(best_cid)
+
+            same_circuit = (
+                g_canon is not None
+                and best_canon is not None
+                and g_canon == best_canon
+            )
+
+            if self.ge_config.require_top_rank:
+                successful = best_score >= threshold and same_circuit
+            else:
+                above_threshold = [
+                    (cid, sc) for cid, sc in candidate_scores
+                    if sc >= threshold
+                ]
+                successful = bool(above_threshold) and same_circuit
+                if above_threshold:
+                    best_cid, best_score = above_threshold[0]
+
+            predicted_exit_fp = (
+                ground_truth.get(best_cid, {}).get("exit")
+                if successful else None
+            )
+
+            results.append(
+                DeanonymizationResult(
+                    client_id=f"client_seed{seed}_{g_prof.circuit_id}",
+                    circuit_id=g_prof.circuit_id,
+                    true_guard=true_guard,
+                    true_exit=true_exit,
+                    predicted_guard=true_guard if g_canon else None,
+                    predicted_exit=predicted_exit_fp,
+                    confidence=float(np.clip(best_score, 0, 1)),
+                    correlation_score=best_score,
+                    time_to_identify=time.perf_counter() - t_start,
+                    successful=successful,
+                )
+            )
 
         return results
 
@@ -319,285 +480,6 @@ class GuardExitAttack(BaseAttack):
         except Exception:
             return b64
 
-    @staticmethod
-    def _parse_consensus_file(path: Path,) -> Dict[str, Dict[str, Any]]:
-        """Parse a single Tor consensus file and extract relay metadata.
-
-        Iterates line-by-line over the consensus and tracks ``r`` (router)
-        and ``s`` (status flags) lines. Only relays that have at least one
-        status line are included.
-
-        The consensus format is defined in Tor's directory-spec.txt.
-        Relevant lines::
-
-            r <nickname> <identity_b64> <digest_b64> <date> <time> <IP> <ORport> <Dirport>
-            s <Flag1> <Flag2> ...
-
-        Args:
-            path: Path to a consensus file (plain text, not compressed).
-
-        Returns:
-            A dict mapping hex fingerprint strings to metadata dicts. Each
-            metadata dict contains:
-
-            * ``"nickname"`` (str): the relay nickname.
-            * ``"flags"`` (List[str]): consensus flags, e.g.
-              ``["Guard", "Exit", "Fast", "Running", "Stable", "Valid"]``.
-
-            Returns an empty dict if the file cannot be read.
-        """
-        relays: Dict[str, Dict[str, Any]] = {}
-        current_fp: Optional[str] = None
-
-        try:
-            with path.open(errors="replace") as fh:
-                for raw_line in fh:
-                    line = raw_line.rstrip("\n")
-
-                    if line.startswith("r "):
-                        parts = line.split()
-                        if len(parts) >= 3:
-                            current_fp = GuardExitAttack._b64_fingerprint_to_hex(
-                                parts[2]
-                            )
-                            relays[current_fp] = {
-                                "nickname": parts[1],
-                                "flags": [],
-                            }
-
-                    elif line.startswith("s ") and current_fp is not None:
-                        relays[current_fp]["flags"] = line.split()[1:]
-
-        except OSError as exc:
-            logger.warning("Could not read consensus file %s: %s", path, exc)
-
-        return relays
-
-    @classmethod
-    def _parse_consensus_dir(
-        cls,
-        consensus_dir: Path,
-        max_files: int = 24,
-    ) -> Dict[str, Dict[str, Any]]:
-        """Parse consensus files from a CollecTor directory and merge the results.
-
-        CollecTor archives consensuses in a nested layout::
-
-            <consensuses-YYYY-MM>/
-                    DD/
-                        YYYY-MM-DD-HH-MM-SS-consensus
-                        ...
-
-        Flat directories (all files directly under ``consensus_dir``) are
-        also supported for convenience.
-
-        Relay entries are merged across files: if a fingerprint appears in
-        multiple files the entry from the most recently processed file wins.
-        In practice relays rarely change flags within a single month, so
-        using a subset of files is sufficient for adversary selection.
-
-        Args:
-            consensus_dir: Root of the CollecTor consensus archive, e.g.
-                ``Path("data/consensuses-2023-04")``.
-            max_files: Maximum number of consensus files to process. Older
-                files are skipped once the limit is reached. Defaults to 24
-                (one day of hourly snapshots), which gives a representative
-                sample of the network without excessive parsing time.
-
-        Returns:
-            A merged relay metadata dict in the same format as
-            ``_parse_consensus_file``. Returns an empty dict when no
-            consensus files are found.
-
-        Raises:
-            ValueError: If ``consensus_dir`` is not an existing directory.
-        """
-        if not consensus_dir.is_dir():
-            raise ValueError(
-                f"consensus_dir is not a directory: {consensus_dir}"
-            )
-
-        candidates: List[Path] = sorted(
-            consensus_dir.rglob("*-consensus"),
-            key=lambda p: p.name,
-        )
-
-        if not candidates:
-            candidates = sorted(
-                p for p in consensus_dir.rglob("*")
-                if p.is_file() and not p.suffix
-            )
-
-        if not candidates:
-            logger.warning(
-                "No consensus files found under %s", consensus_dir
-            )
-            return {}
-
-        selected = candidates[:max_files]
-        logger.info(
-            "Parsing %d/%d consensus files from %s …",
-            len(selected),
-            len(candidates),
-            consensus_dir,
-        )
-
-        merged: Dict[str, Dict[str, Any]] = {}
-        for path in selected:
-            merged.update(cls._parse_consensus_file(path))
-
-        guards  = sum(1 for m in merged.values() if "Guard" in m["flags"])
-        exits   = sum(1 for m in merged.values() if "Exit"  in m["flags"])
-        middles = len(merged) - guards - exits
-        logger.info(
-            "Parsed %d unique relays — Guard: %d, Exit: %d, Middle: %d",
-            len(merged), guards, exits, middles,
-        )
-        return merged
-
-    def _load_adversary_relays_from_consensus(self, consensus_dir: Path) -> None:
-        """Parse a consensus directory and populate the adversary relay sets.
-
-        Calls ``_parse_consensus_dir`` to read relay flags, then passes the
-        result to ``_build_adversary_relay_list`` and stores the selected
-        fingerprints in ``_adversary_guards`` and ``_adversary_exits``.
-
-        Args:
-            consensus_dir: Path to the root of a CollecTor consensus archive.
-        """
-        try:
-            network_data = self._parse_consensus_dir(consensus_dir)
-            if not network_data:
-                logger.warning(
-                    "No relay data parsed from %s; adversary lists remain empty.",
-                    consensus_dir,
-                )
-                return
-            guards, _, exits = self._build_adversary_relay_list(network_data)
-            self._adversary_guards = guards
-            self._adversary_exits = exits
-        except (ValueError, OSError) as exc:
-            self.logger.error(
-                "Failed to load adversary relays from consensus dir %s: %s",
-                consensus_dir,
-                exc,
-            )
-
-    def _auto_load_adversary_relays(self, sim_dir: Path) -> None:
-        """Auto-discover a consensus directory and populate adversary relay lists.
-
-        Search order:
-            1. ``ge_config.consensus_dir`` if set.
-            2. Any directory matching ``consensuses-*`` under the workspace.
-            3. Any directory matching ``consensuses-*`` adjacent to ``sim_dir``.
-
-        Logs a warning when no consensus directory can be found.
-
-        Args:
-            sim_dir: Root of the simulation output directory for the current
-                seed, used to anchor the fallback search.
-        """
-        if self.ge_config.consensus_dir and self.ge_config.consensus_dir.exists():
-            self._load_adversary_relays_from_consensus(self.ge_config.consensus_dir)
-            return
-
-        candidates: List[Path] = []
-        for pattern in ("consensuses-*", "data/consensuses-*"):
-            candidates.extend(self.workspace.glob(pattern))
-
-        if not candidates:
-            candidates.extend(sim_dir.parent.glob("consensuses-*"))
-
-        if candidates:
-            chosen = sorted(candidates)[-1]
-            self.logger.info("Auto-discovered consensus directory: %s", chosen)
-            self._load_adversary_relays_from_consensus(chosen)
-        else:
-            self.logger.warning(
-                "No consensus directory found. "
-                "Provide consensus_dir in the config or place a "
-                "'consensuses-*' directory under %s.",
-                self.workspace,
-            )
-
-    def _correlate_all_pairs(
-            self,
-            guard_profiles: List[TrafficProfile],
-            exit_profiles: List[TrafficProfile],
-            ground_truth: Dict[str, Dict[str, str]],
-            seed: int,
-    ) -> List[DeanonymizationResult]:
-        """Cross-correlate every guard–exit profile pair and produce results.
-
-        For each guard profile:
-            1. Scores all candidate exit profiles using ``_correlate_and_decide``.
-            2. Ranks candidates by descending score.
-            3. Declares a match for the top-ranked candidate when
-               ``require_top_rank`` is ``True``, or for any candidate above
-               the threshold otherwise.
-            4. Checks whether the matched circuit ID equals the guard profile's
-               own circuit ID (both derived from the same canonical key, so
-               equality holds only for the correct exit).
-
-        Args:
-            guard_profiles: Traffic profiles observed at adversary guard relays.
-            exit_profiles: Traffic profiles observed at adversary exit relays.
-            ground_truth: Mapping of circuit label to relay fingerprints,
-                as returned by ``_build_ground_truth``.
-            seed: Seed index embedded in ``DeanonymizationResult.client_id``
-                for traceability.
-
-        Returns:
-            A list of ``DeanonymizationResult`` objects, one per guard profile
-            that had at least one candidate exit profile to compare against.
-        """
-        results: List[DeanonymizationResult] = []
-
-        for g_prof in guard_profiles:
-            t_start = time.perf_counter()
-            cid = g_prof.circuit_id
-            gt = ground_truth.get(cid, {})
-            true_guard = gt.get("guard", g_prof.metadata.get("guard_fp", "unknown"))
-            true_exit = gt.get("exit", g_prof.metadata.get("exit_fp", "unknown"))
-
-            candidate_scores: List[Tuple[str, float]] = []
-            for e_prof in exit_profiles:
-                score, _ = self._correlate_and_decide(g_prof, e_prof)
-                candidate_scores.append((e_prof.circuit_id, score))
-
-            if not candidate_scores:
-                continue
-
-            candidate_scores.sort(key=lambda x: x[1], reverse=True)
-            best_cid, best_score = candidate_scores[0]
-
-            threshold = self.config.correlation_thresholds.get("cross_correlation", 0.7)
-            if self.ge_config.require_top_rank:
-                predicted_exit_id = best_cid
-                successful = best_score >= threshold and predicted_exit_id == cid
-            else:
-                successful = best_score >= threshold
-                predicted_exit_id = best_cid if successful else None
-
-            confidence = float(np.clip(best_score, 0, 1))
-            elapsed = time.perf_counter() - t_start
-
-            results.append(
-                DeanonymizationResult(
-                    client_id=f"client_seed{seed}_{cid}",
-                    circuit_id=cid,
-                    true_guard=true_guard,
-                    true_exit=true_exit,
-                    predicted_guard=g_prof.metadata.get("guard_fp"),
-                    predicted_exit=predicted_exit_id,
-                    confidence=confidence,
-                    correlation_score=best_score,
-                    time_to_identify=elapsed,
-                    successful=successful,
-                )
-            )
-
-        return results
 
     def _generate_synthetic_results(self, seed: int) -> List[DeanonymizationResult]:
         """Generate synthetic deanonymization results for demo and unit testing.
@@ -635,7 +517,6 @@ class GuardExitAttack(BaseAttack):
 
         for i in range(n_circuits):
             is_compromised = rng.random() < p_compromise
-
             if is_compromised:
                 score = float(np.clip(rng.normal(0.82, 0.08), 0, 1))
             else:
@@ -686,65 +567,3 @@ class GuardExitAttack(BaseAttack):
                 self.config.adversary_exit_fraction,
             ),
         }
-
-    def _build_ground_truth(self, hosts_dir: Path) -> Dict[str, Dict[str, str]]:
-        """Build a circuit-to-relay mapping from ``CIRC BUILT`` events in host logs.
-
-        Iterates every ``oniontrace.log`` file under ``hosts_dir`` using
-        ``_iter_circ_built`` and extracts the three-hop fingerprint path from
-        each ``CIRC BUILT`` event. The resulting dict is keyed by the same
-        ``"{guard_fp[:8]}..{exit_fp[:8]}"`` label that
-        ``_load_profiles_from_cell_stats`` stores in
-        ``TrafficProfile.circuit_id``, so ``ground_truth.get(profile.circuit_id)``
-        always resolves without a separate lookup step.
-
-        Args:
-            hosts_dir: Path to the ``shadow.data/hosts/`` directory whose
-                subdirectories each contain an ``oniontrace.log`` file.
-
-        Returns:
-            A dict mapping circuit label strings to inner dicts with keys
-            ``"guard"``, ``"middle"``, and ``"exit"``, each holding a full
-            uppercase hex fingerprint string. When the same circuit label is
-            seen in multiple relay logs the first occurrence wins, since all
-            relays record identical path information for the same circuit.
-            Returns an empty dict when no ``CIRC BUILT`` events are found.
-        """
-        ground_truth: Dict[str, Dict[str, str]] = {}
-
-        for log_path in sorted(hosts_dir.glob("*/oniontrace.log")):
-            for _ts, _cid, path_str in self._iter_circ_built(log_path):
-                key = self._canonical_circuit_key(path_str)
-                if key is None:
-                    continue
-                guard_fp, middle_fp, exit_fp = key
-                circuit_label = f"{guard_fp[:8]}..{exit_fp[:8]}"
-                if circuit_label not in ground_truth:
-                    ground_truth[circuit_label] = {
-                        "guard": guard_fp,
-                        "middle": middle_fp,
-                        "exit": exit_fp,
-                    }
-
-        self.logger.debug(
-            "Built ground truth for %d circuits from %s.",
-            len(ground_truth),
-            hosts_dir,
-        )
-        return ground_truth
-
-    @staticmethod
-    def _find_shadow_data_hosts(sim_dir: Path) -> Optional[Path]:
-        """Search common locations for the hosts directory under shadow.data.
-
-        Args:
-            sim_dir: Root of the simulation output directory for this seed.
-
-        Returns:
-            Path to the first matching hosts directory.
-        """
-        candidates = list(sim_dir.rglob("shadow.data/hosts"))
-        for p in candidates:
-            if p.exists():
-                return p
-        return None
