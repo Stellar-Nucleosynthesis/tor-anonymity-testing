@@ -651,7 +651,7 @@ class BaseAttack(abc.ABC):
 
         guards = sum(1 for m in merged.values() if "Guard" in m["flags"])
         exits = sum(1 for m in merged.values() if "Exit" in m["flags"])
-        middles = len(merged) - guards - exits
+        middles = len(merged)
         logger.info(
             "Parsed %d unique relays — Guard: %d, Exit: %d, Middle: %d",
             len(merged), guards, exits, middles,
@@ -679,28 +679,32 @@ class BaseAttack(abc.ABC):
 
             Returns an empty dict if the directory cannot be read.
         """
-        relays: Dict[str, Dict[str, Any]] = {}
         current_fp = cls._find_host_fingerprint(path)
         if not current_fp:
-            return relays
+            return {}
+        metadata: Dict[str, Any] = {
+            "nickname": path.name,
+            "flags": [],
+        }
+
+        prim_path = path / "cached-consensus"
+        fallback_path = path / "cached-microdesc-consensus"
+        cons_path = prim_path if prim_path.exists() else fallback_path
+        if not cons_path.exists():
+            return {}
 
         try:
-            with (path / "cached-consensus").open(errors="replace") as fh:
+            with cons_path.open(errors="replace") as fh:
                 for raw_line in fh:
                     line = raw_line.rstrip("\n")
-                    if line.startswith("r "):
+                    if line.startswith("known-flags "):
                         parts = line.split()
-                        if len(parts) >= 3:
-                            relays[current_fp] = {
-                                "nickname": parts[1],
-                                "flags": [],
-                            }
-                    elif line.startswith("s ") and current_fp is not None:
-                        relays[current_fp]["flags"] = line.split()[1:]
+                        metadata["flags"] = parts[1:]
         except OSError as exc:
             logger.warning("Could not read host consensus file %s: %s", path, exc)
+            return {}
 
-        return relays
+        return {current_fp: metadata}
 
     @staticmethod
     def _find_host_fingerprint(host_dir: Path) -> Optional[str]:
