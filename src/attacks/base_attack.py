@@ -6,6 +6,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -318,7 +319,7 @@ class BaseAttack(abc.ABC):
         r'ID=(?P<cid>\d+)\s+'
         r'READ=(?P<read>\d+)\s+'
         r'WRITTEN=(?P<written>\d+)\s+'
-        r'TIME=(?P<time_us>\d+)'
+        r'TIME=(?P<time>\S+)'
     )
 
     def _load_profiles_from_oniontrace(
@@ -384,8 +385,7 @@ class BaseAttack(abc.ABC):
                 if bytes_val == 0:
                     continue
 
-                ts_s = time_us / 1_000_000.0
-                circuit_data.setdefault(cid, []).append((ts_s, bytes_val))
+                circuit_data.setdefault(cid, []).append((time_us, bytes_val))
                 total_events += 1
 
             for local_cid, events in circuit_data.items():
@@ -398,7 +398,7 @@ class BaseAttack(abc.ABC):
                 if profile is not None:
                     profiles.append(profile)
 
-        self.logger.debug(
+        self.logger.info(
             "Loaded %d profile(s) from %d relay(s) (%d CIRC_BW events, point=%s).",
             len(profiles),
             len(relay_filter),
@@ -428,11 +428,13 @@ class BaseAttack(abc.ABC):
                 for line in fh:
                     m = self._RE_CIRC_BW.search(line)
                     if m:
+                        ts = datetime.fromisoformat(m.group("time"))
+                        hms_seconds = ts.hour * 3600 + ts.minute * 60 + ts.second
                         yield (
                             m.group("cid"),
                             int(m.group("read")),
                             int(m.group("written")),
-                            int(m.group("time_us")),
+                            hms_seconds,
                         )
         except OSError as exc:
             self.logger.warning("Could not read %s: %s", log_path, exc)

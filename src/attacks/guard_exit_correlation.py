@@ -350,30 +350,104 @@ class GuardExitAttack(BaseAttack):
         hostnames = [hop.split("~")[1].lstrip("$").upper() for hop in hops]
         return hostnames[0], hostnames[1], hostnames[2]
 
+    _BW_RATIO_MAX: float = 3.0
+
+    @staticmethod
+    def _build_exit_index(
+            exit_profiles: List[TrafficProfile],
+    ) -> Tuple[List[TrafficProfile], List[float]]:
+        """Sort exit profiles by ``first_packet_time`` for O(log N) range queries.
+
+        Args:
+            exit_profiles: Unsorted list of exit ``TrafficProfile`` objects.
+
+        Returns:
+            A tuple of ``(sorted_exits, exit_starts)`` where ``sorted_exits``
+            is ordered by ascending ``first_packet_time`` and ``exit_starts``
+            holds the corresponding float values for use with ``bisect``.
+        """
+        sorted_exits = sorted(exit_profiles, key=lambda p: p.first_packet_time)
+        exit_starts = [p.first_packet_time for p in sorted_exits]
+        return sorted_exits, exit_starts
+
+    def _candidates_for_guard(
+            self,
+            g_prof: TrafficProfile,
+            sorted_exits: List[TrafficProfile],
+            exit_starts: List[float],
+    ) -> List[TrafficProfile]:
+        """Return exit profiles that are plausible matches for ``g_prof``.
+
+        Two cheap filters are applied in sequence so that
+        ``CorrelationAnalyzer`` is only called on survivors:
+
+        **Filter 1 — temporal overlap** (O(log N))
+            Guard and exit observe the same circuit within a propagation delay
+            bounded by ``ge_config.max_time_lag``.  Exit profiles whose
+            ``first_packet_time`` lies entirely outside the window
+            ``[guard_start − max_lag, guard_end + max_lag]`` are discarded via
+            ``bisect`` without inspecting individual entries.
+
+        **Filter 2 — byte-count ratio** (O(k) on time-filter survivors)
+            Guard and exit carry the same application payload ±
+            ``_BW_RATIO_MAX`` for Tor cell overhead.  Exit profiles whose
+            ``total_bytes`` fall outside that band are discarded.
+
+        Both filters are *sound*: no true match can be discarded.  A true
+        match must by definition overlap in time and carry comparable bytes.
+
+        Args:
+            g_prof: Guard profile for which candidates are sought.
+            sorted_exits: Exit profiles sorted by ``first_packet_time``.
+            exit_starts: Parallel float list for ``bisect`` queries.
+
+        Returns:
+            Exit ``TrafficProfile`` objects that pass both filters.
+        """
+        import bisect as _bisect
+
+        lag = self.ge_config.max_time_lag
+        lo_time = g_prof.first_packet_time - lag
+        hi_time = g_prof.last_packet_time + lag
+
+        lo_idx = _bisect.bisect_left(exit_starts, lo_time)
+        hi_idx = _bisect.bisect_right(exit_starts, hi_time)
+        time_candidates = sorted_exits[lo_idx:hi_idx]
+
+        if not time_candidates:
+            return []
+
+        g_bytes = max(g_prof.total_bytes, 1)
+        lo_bytes = g_bytes / self._BW_RATIO_MAX
+        hi_bytes = g_bytes * self._BW_RATIO_MAX
+        return [e for e in time_candidates if lo_bytes <= e.total_bytes <= hi_bytes]
 
     def _correlate_all_pairs(
-        self,
-        guard_profiles: List[TrafficProfile],
-        exit_profiles: List[TrafficProfile],
-        ground_truth: Dict[str, Dict[str, str]],
-        seed: int,
+            self,
+            guard_profiles: List[TrafficProfile],
+            exit_profiles: List[TrafficProfile],
+            ground_truth: Dict[str, Dict[str, str]],
+            seed: int,
     ) -> List[DeanonymizationResult]:
-        """Cross-correlate every guard–exit profile pair and produce results.
+        """Cross-correlate guard–exit profile pairs using a two-stage index.
 
-        For each guard profile:
-            1. Scores all candidate exit profiles using ``_correlate_and_decide``.
-            2. Ranks candidates by descending score.
-            3. Resolves both the guard profile and the best-ranked exit profile
-               to their canonical circuit fingerprints via ``ground_truth``.
-            4. Declares the match successful when both profiles resolve to the
-               same canonical circuit and the score meets the threshold
-               (and, if ``require_top_rank`` is ``True``, the best-ranked
-               candidate is the one that matches).
+        **Complexity**
 
-        Guard and exit profile ``circuit_id`` values are scoped strings of the
-        form ``"hostname/local_cid"`` and are never directly comparable across
-        relays.  Success is determined entirely by canonical fingerprint
-        equality, not by ``circuit_id`` equality.
+        Naïve M × N correlation is replaced by:
+
+        * O(N log N) — sort exit profiles once by ``first_packet_time``.
+        * O(M log N) — binary-search per guard profile for temporally
+          overlapping candidates.
+        * O(M · k · C) — run ``CorrelationAnalyzer`` only on surviving
+          candidates, where k << N because circuits are short-lived and at
+          most a handful are concurrently active on any given second.
+
+        **Success criterion**
+
+        Guard and exit ``circuit_id`` values are ``"hostname/local_cid"``
+        strings that are never directly comparable across relays.  Success is
+        declared when both profiles resolve to the same canonical
+        ``(guard_fp, middle_fp, exit_fp)`` triple via ``ground_truth``.
 
         Args:
             guard_profiles: Traffic profiles observed at adversary guard relays,
@@ -387,35 +461,40 @@ class GuardExitAttack(BaseAttack):
 
         Returns:
             A list of ``DeanonymizationResult`` objects, one per guard profile
-            that had at least one candidate exit profile to compare against.
+            for which at least one candidate survived the pre-filters.
         """
         results: List[DeanonymizationResult] = []
         threshold = self.config.correlation_thresholds.get("cross_correlation", 0.7)
 
+        sorted_exits, exit_starts = self._build_exit_index(exit_profiles)
+
+        total_candidates = 0
+
         for g_prof in guard_profiles:
             t_start = time.perf_counter()
             g_canon = ground_truth.get(g_prof.circuit_id)
-
             true_guard = (g_canon or {}).get("guard", "unknown")
-            true_exit  = (g_canon or {}).get("exit",  "unknown")
+            true_exit = (g_canon or {}).get("exit", "unknown")
+
+            candidates = self._candidates_for_guard(g_prof, sorted_exits, exit_starts)
+            total_candidates += len(candidates)
+
+            if not candidates:
+                continue
 
             candidate_scores: List[Tuple[str, float]] = []
-            for e_prof in exit_profiles:
+            for e_prof in candidates:
                 score, _ = self._correlate_and_decide(g_prof, e_prof)
                 candidate_scores.append((e_prof.circuit_id, score))
-
-            if not candidate_scores:
-                continue
 
             candidate_scores.sort(key=lambda x: x[1], reverse=True)
             best_cid, best_score = candidate_scores[0]
 
             best_canon = ground_truth.get(best_cid)
-
             same_circuit = (
-                g_canon is not None
-                and best_canon is not None
-                and g_canon == best_canon
+                    g_canon is not None
+                    and best_canon is not None
+                    and g_canon == best_canon
             )
 
             if self.ge_config.require_top_rank:
@@ -429,7 +508,7 @@ class GuardExitAttack(BaseAttack):
                 if above_threshold:
                     best_cid, best_score = above_threshold[0]
 
-            predicted_exit_id = (
+            predicted_exit_fp = (
                 ground_truth.get(best_cid, {}).get("exit")
                 if successful else None
             )
@@ -441,7 +520,7 @@ class GuardExitAttack(BaseAttack):
                     true_guard=true_guard,
                     true_exit=true_exit,
                     predicted_guard=true_guard if g_canon else None,
-                    predicted_exit=predicted_exit_id,
+                    predicted_exit=predicted_exit_fp,
                     confidence=float(np.clip(best_score, 0, 1)),
                     correlation_score=best_score,
                     time_to_identify=time.perf_counter() - t_start,
@@ -449,6 +528,13 @@ class GuardExitAttack(BaseAttack):
                 )
             )
 
+        self.logger.debug(
+            "Correlated %d guard profile(s) against %d exit profile(s): "
+            "%d pair(s) evaluated (%.1f avg/guard; brute-force would be %d).",
+            len(guard_profiles), len(exit_profiles),
+            total_candidates, total_candidates / max(len(guard_profiles), 1),
+                              len(guard_profiles) * len(exit_profiles),
+        )
         return results
 
 

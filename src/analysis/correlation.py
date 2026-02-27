@@ -131,7 +131,7 @@ def cross_correlation(profile1: TrafficProfile,
     Returns:
         Tuple of (correlation_coefficient, time_lag)
     """
-    bin_size = 0.1
+    bin_size = 1
 
     min_time = min(profile1.first_packet_time, profile2.first_packet_time)
     max_time = max(profile1.last_packet_time, profile2.last_packet_time)
