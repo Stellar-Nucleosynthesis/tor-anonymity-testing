@@ -1,4 +1,6 @@
 import abc
+import base64
+import binascii
 import dataclasses
 import logging
 import re
@@ -155,7 +157,7 @@ class BaseAttack(abc.ABC):
         _run_single_seed: Given a parsed simulation output directory and a
             seed index, extract traffic profiles for each observation point
             and return a list of ``DeanonymizationResult`` objects.
-        _build_adversary_relay_list: Return relay fingerprints the adversary
+        _build_adversary_relay_list: Return relay nicknames the adversary
             controls, derived from network topology or tornettools staging data.
         _load_profiles_from_oniontrace: Override if the default ``CIRC_BW``
             parser does not cover the scenario's observation points.
@@ -307,7 +309,7 @@ class BaseAttack(abc.ABC):
 
         Returns:
             A tuple of ``(guard_ids, middle_ids, exit_ids)`` where each
-            element is a list of relay fingerprint strings controlled by the
+            element is a list of relay nicknames controlled by the
             adversary.
         """
 
@@ -368,17 +370,8 @@ class BaseAttack(abc.ABC):
         profiles: List[TrafficProfile] = []
         total_events = 0
 
-        fingerprint_to_name = {}
-        for d in shadow_hosts_dir.iterdir():
-            fp = self._find_host_fingerprint(d)
-            if fp:
-                fingerprint_to_name[fp] = d.name
-
-        for fp in relay_filter:
-            hostname = fingerprint_to_name.get(fp)
-            if hostname is None:
-                self.logger.warning("Relay directory not found for relay: %s — skipping.", fp)
-                continue
+        for host_dir in shadow_hosts_dir.iterdir():
+            hostname = host_dir.name
             log_path = self._find_relay_oniontrace_log(shadow_hosts_dir / hostname)
             if log_path is None:
                 self.logger.warning("No OnionTrace log found in %s — skipping.", hostname)
@@ -545,7 +538,7 @@ class BaseAttack(abc.ABC):
 
         Calls ``_parse_consensus_dir`` to read relay flags, then passes the
         result to ``_build_adversary_relay_list`` and stores the selected
-        fingerprints in ``_adversary_guards`` and ``_adversary_exits``.
+        relay nicknames in ``_adversary_guards`` and ``_adversary_exits``.
 
         Args:
             hosts_dir: Path to the root of a shadow.data directory.
@@ -570,29 +563,29 @@ class BaseAttack(abc.ABC):
 
     @staticmethod
     def _select_adversary_relays(
-        all_relay_fps: List[str],
+        all_relay_names: List[str],
         fraction: float,
         rng: Optional[np.random.Generator] = None,
     ) -> List[str]:
         """Randomly select a fraction of relay IDs as adversary-controlled.
 
         Args:
-            all_relay_fps: Full list of candidate relay fingerprints.
+            all_relay_names: Full list of candidate relay nicknames.
             fraction: Proportion to select, in the range [0, 1]. Values
                 ``<= 0`` always return an empty list.
             rng: NumPy random generator for reproducible selection. A new
                 generator with a random seed is used when ``None``.
 
         Returns:
-            A list of relay fingerprint strings of length
+            A list of relay nicknames of length
             ``max(1, int(len(all_relay_ids) * fraction))``, or an empty list
-            when ``all_relay_ids`` is empty or ``fraction <= 0``.
+            when ``all_relay_names`` is empty or ``fraction <= 0``.
         """
-        if not all_relay_fps or fraction <= 0:
+        if not all_relay_names or fraction <= 0:
             return []
         rng = rng or np.random.default_rng()
-        n = max(1, int(len(all_relay_fps) * fraction))
-        return list(rng.choice(all_relay_fps, size=min(n, len(all_relay_fps)), replace=False))
+        n = max(1, int(len(all_relay_names) * fraction))
+        return list(rng.choice(all_relay_names, size=min(n, len(all_relay_names)), replace=False))
 
     @staticmethod
     def _find_shadow_data_hosts(sim_dir: Path) -> Optional[Path]:
@@ -670,22 +663,22 @@ class BaseAttack(abc.ABC):
             path: Path to a host directory.
 
         Returns:
-            A dict mapping hex fingerprint strings to metadata dicts. Each
+            A dict mapping relay hostnames to metadata dicts. Each
             metadata dict contains:
 
-            * ``"nickname"`` (str): the relay nickname.
+            * ``"fingerprint"`` (str): the relay SHA1 fingerprint.
             * ``"flags"`` (List[str]): consensus flags, e.g.
               ``["Guard", "Exit", "Fast", "Running", "Stable", "Valid"]``.
 
             Returns an empty dict if the directory cannot be read.
         """
-        current_fp = cls._find_host_fingerprint(path)
-        if not current_fp:
-            return {}
+        hostname = path.name
         metadata: Dict[str, Any] = {
-            "nickname": path.name,
             "flags": [],
         }
+        fp = cls._find_host_fingerprint(path)
+        if not fp:
+            metadata["fingerprint"] = fp
 
         prim_path = path / "cached-consensus"
         fallback_path = path / "cached-microdesc-consensus"
@@ -704,7 +697,7 @@ class BaseAttack(abc.ABC):
             logger.warning("Could not read host consensus file %s: %s", path, exc)
             return {}
 
-        return {current_fp: metadata}
+        return {hostname: metadata}
 
     @staticmethod
     def _find_host_fingerprint(host_dir: Path) -> Optional[str]:
@@ -742,6 +735,31 @@ class BaseAttack(abc.ABC):
         """
         p = relay_dir / "oniontrace.1003.stdout"
         return p if p.is_file() else None
+
+    @staticmethod
+    def _b64_fingerprint_to_hex(b64: str) -> str:
+        """Convert a base64-encoded relay fingerprint to an uppercase hex string.
+
+        Tor consensus ``r`` lines encode the 20-byte identity fingerprint in
+        base64 without padding. This method re-adds the padding before
+        decoding and returns the standard 40-character hex representation.
+
+        Args:
+            b64: Base64 fingerprint string as it appears in the ``r`` line of
+                a consensus file (no ``=`` padding, typically 27 characters).
+
+        Returns:
+            A 40-character uppercase hex string, e.g.
+            ``"AABBCCDDEEFF00112233445566778899AABBCCDD"``.
+            Returns the original string unchanged if decoding fails.
+        """
+        try:
+            pad = (4 - len(b64) % 4) % 4
+            return binascii.hexlify(
+                base64.b64decode(b64 + "=" * pad)
+            ).upper().decode()
+        except Exception:
+            return b64
 
     def __repr__(self) -> str:
         return (

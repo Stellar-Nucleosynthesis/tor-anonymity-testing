@@ -1,5 +1,3 @@
-import base64
-import binascii
 import logging
 import re
 import time
@@ -113,29 +111,27 @@ class GuardExitAttack(BaseAttack):
         Selection uses a fixed RNG seed of 42 for reproducibility across runs.
 
         Args:
-            network_data: Mapping of hex fingerprint strings to relay metadata
+            network_data: Mapping of relay nicknames to relay metadata
                 dicts containing at least a ``"flags"`` list. Produced by
                 ``_parse_consensus_dir``.
 
         Returns:
             A tuple of ``(adv_guards, adv_middles, adv_exits)`` where each
-            element is a list of relay fingerprint strings selected as
+            element is a list of relay nicknames selected as
             adversary-controlled.
         """
         rng = np.random.default_rng(seed=42)
 
         guards = [
-            fp for fp, meta in network_data.items()
+            name for name, meta in network_data.items()
             if "Guard" in meta.get("flags", [])
         ]
         exits = [
-            fp for fp, meta in network_data.items()
+            name for name, meta in network_data.items()
             if "Exit" in meta.get("flags", [])
         ]
         middles = [
-            fp for fp, meta in network_data.items()
-            if "Guard" not in meta.get("flags", [])
-            and "Exit" not in meta.get("flags", [])
+            name for name, meta in network_data.items()
         ]
 
         adv_guards = self._select_adversary_relays(
@@ -258,11 +254,11 @@ class GuardExitAttack(BaseAttack):
         return results
 
     def _build_ground_truth(self, hosts_dir: Path) -> Dict[str, Dict[str, str]]:
-        """Build a ``"hostname/local_cid"`` → relay-fingerprint mapping.
+        """Build a ``"hostname/local_cid"`` → relay-hostname mapping.
 
         Iterates every OnionTrace log under ``hosts_dir`` and extracts
         ``CIRC BUILT`` events.  Because every relay that is part of a circuit
-        logs the same three-hop fingerprint path, the first occurrence of each
+        logs the same three-hop path, the first occurrence of each
         ``(hostname, local_cid)`` pair is sufficient.
 
         The resulting dict is keyed by ``"hostname/local_cid"``, which is
@@ -278,7 +274,7 @@ class GuardExitAttack(BaseAttack):
         Returns:
             A dict mapping ``"hostname/local_cid"`` strings to inner dicts
             with keys ``"guard"``, ``"middle"``, and ``"exit"``, each holding
-            a full uppercase hex fingerprint string.  Returns an empty dict
+            a relay hoctname string. Returns an empty dict
             when no ``CIRC BUILT`` events are found.
         """
         ground_truth: Dict[str, Dict[str, str]] = {}
@@ -296,11 +292,11 @@ class GuardExitAttack(BaseAttack):
                     continue
                 parsed = self._parse_circ_path(path_str)
                 if parsed is not None:
-                    guard_fp, middle_fp, exit_fp = parsed
+                    guard_name, middle_name, exit_name = parsed
                     ground_truth[key] = {
-                        "guard":  guard_fp,
-                        "middle": middle_fp,
-                        "exit":   exit_fp,
+                        "guard":  guard_name,
+                        "middle": middle_name,
+                        "exit":   exit_name,
                     }
 
         self.logger.debug(
@@ -334,7 +330,7 @@ class GuardExitAttack(BaseAttack):
 
     @staticmethod
     def _parse_circ_path(path_str: str,) -> Optional[Tuple[str, str, str]]:
-        """Parse a ``CIRC BUILT`` path string into a fingerprint triple.
+        """Parse a ``CIRC BUILT`` path string into a relay ID tuple.
 
         The path field has the form::
 
@@ -344,15 +340,15 @@ class GuardExitAttack(BaseAttack):
             path_str: The raw path field from a ``CIRC BUILT`` log line.
 
         Returns:
-            A tuple of ``(guard_fp, middle_fp, exit_fp)`` uppercase hex
+            A tuple of ``(guard_name, middle_name, exit_name)`` uppercase hex
             strings, or ``None`` when the path does not contain exactly three
             hops (e.g. two-hop directory circuits or malformed lines).
         """
         hops = path_str.split(",")
         if len(hops) != 3:
             return None
-        fps = [hop.split("~")[0].lstrip("$").upper() for hop in hops]
-        return fps[0], fps[1], fps[2]
+        hostnames = [hop.split("~")[1].lstrip("$").upper() for hop in hops]
+        return hostnames[0], hostnames[1], hostnames[2]
 
 
     def _correlate_all_pairs(
@@ -433,7 +429,7 @@ class GuardExitAttack(BaseAttack):
                 if above_threshold:
                     best_cid, best_score = above_threshold[0]
 
-            predicted_exit_fp = (
+            predicted_exit_id = (
                 ground_truth.get(best_cid, {}).get("exit")
                 if successful else None
             )
@@ -445,7 +441,7 @@ class GuardExitAttack(BaseAttack):
                     true_guard=true_guard,
                     true_exit=true_exit,
                     predicted_guard=true_guard if g_canon else None,
-                    predicted_exit=predicted_exit_fp,
+                    predicted_exit=predicted_exit_id,
                     confidence=float(np.clip(best_score, 0, 1)),
                     correlation_score=best_score,
                     time_to_identify=time.perf_counter() - t_start,
@@ -454,31 +450,6 @@ class GuardExitAttack(BaseAttack):
             )
 
         return results
-
-    @staticmethod
-    def _b64_fingerprint_to_hex(b64: str) -> str:
-        """Convert a base64-encoded relay fingerprint to an uppercase hex string.
-
-        Tor consensus ``r`` lines encode the 20-byte identity fingerprint in
-        base64 without padding. This method re-adds the padding before
-        decoding and returns the standard 40-character hex representation.
-
-        Args:
-            b64: Base64 fingerprint string as it appears in the ``r`` line of
-                a consensus file (no ``=`` padding, typically 27 characters).
-
-        Returns:
-            A 40-character uppercase hex string, e.g.
-            ``"AABBCCDDEEFF00112233445566778899AABBCCDD"``.
-            Returns the original string unchanged if decoding fails.
-        """
-        try:
-            pad = (4 - len(b64) % 4) % 4
-            return binascii.hexlify(
-                base64.b64decode(b64 + "=" * pad)
-            ).upper().decode()
-        except Exception:
-            return b64
 
 
     def _generate_synthetic_results(self, seed: int) -> List[DeanonymizationResult]:
