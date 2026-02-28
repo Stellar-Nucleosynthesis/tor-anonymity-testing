@@ -543,7 +543,7 @@ class SimulationOrchestrator:
         self.logger.info("✓ Network generation completed")
 
         self.logger.info("Step 3/5: Running Shadow simulation...")
-        self.run_simulation(network_dir, ['--args', "--stop-time 3600"])
+        self.run_simulation(network_dir)
         results['simulation_completed'] = True
         results['pipeline_steps'].append('simulate')
         self.logger.info("✓ Simulation completed")
