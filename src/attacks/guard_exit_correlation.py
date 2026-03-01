@@ -347,7 +347,7 @@ class GuardExitAttack(BaseAttack):
         hops = path_str.split(",")
         if len(hops) != 3:
             return None
-        hostnames = [hop.split("~")[1].lstrip("$").upper() for hop in hops]
+        hostnames = [hop.split("~")[1].strip() for hop in hops]
         return hostnames[0], hostnames[1], hostnames[2]
 
     _BW_RATIO_MAX: float = 3.0

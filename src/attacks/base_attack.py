@@ -375,7 +375,7 @@ class BaseAttack(abc.ABC):
             hostname = host_dir.name
             log_path = self._find_relay_oniontrace_log(shadow_hosts_dir / hostname)
             if log_path is None:
-                self.logger.warning("No OnionTrace log found in %s — skipping.", hostname)
+                self.logger.debug("No OnionTrace log found in %s — skipping.", hostname)
                 continue
 
             circuit_data: Dict[str, List[Tuple[float, int]]] = {}
