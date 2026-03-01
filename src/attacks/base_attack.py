@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
-from src.analysis.correlation import CorrelationAnalyzer, TrafficProfile
+from src.analysis.correlation import CorrelationAnalyzer, TrafficProfile, CorrelationConfig
 from src.analysis.deanonymization import DeanonymizationResult, evaluate_attack
 from src.analysis.metrics import compute_roc_metrics
 
@@ -48,10 +48,11 @@ class AttackConfig:
     adversary_middle_fraction: float = 0.0
     num_seeds: int = 3
     correlation_methods: List[str] = field(
-        default_factory=lambda: ["cross_correlation", "flow_fingerprinting"]
+        default_factory=lambda: ["cross_correlation"]
     )
+    primary_method: str = "cross_correlation"
     correlation_thresholds: Dict[str, float] = field(
-        default_factory=lambda: {"cross_correlation": 0.7, "dtw_distance": 100}
+        default_factory=lambda: {"cross_correlation": 0.9}
     )
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -185,12 +186,12 @@ class BaseAttack(abc.ABC):
         self.config = config
         self.workspace = Path(workspace) if workspace else Path("./workspace")
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
-        self._analyzer = CorrelationAnalyzer(
-            {
+        analyzer_conf = CorrelationConfig.from_dict({
                 "methods": config.correlation_methods,
                 "thresholds": config.correlation_thresholds,
-            }
-        )
+                "primary": config.primary_method
+            })
+        self._analyzer = CorrelationAnalyzer(analyzer_conf)
 
 
     def configure(self, **kwargs: Any) -> None:
@@ -371,8 +372,7 @@ class BaseAttack(abc.ABC):
         profiles: List[TrafficProfile] = []
         total_events = 0
 
-        for host_dir in shadow_hosts_dir.iterdir():
-            hostname = host_dir.name
+        for hostname in relay_filter:
             log_path = self._find_relay_oniontrace_log(shadow_hosts_dir / hostname)
             if log_path is None:
                 self.logger.debug("No OnionTrace log found in %s — skipping.", hostname)
@@ -513,11 +513,7 @@ class BaseAttack(abc.ABC):
             when all configured thresholds are satisfied.
         """
         scores = self._analyzer.correlate_profiles(guard_profile, exit_profile)
-        primary_score = scores.get(
-            "cross_correlation", scores.get("fingerprint_similarity", 0.0)
-        )
-        is_match = self._analyzer.is_match(scores)
-        return float(primary_score), is_match
+        return self._analyzer.is_match(scores)
 
     def _extra_info(self) -> Dict[str, Any]:
         """Return additional metadata to include in ``AttackResult.extra_info``.

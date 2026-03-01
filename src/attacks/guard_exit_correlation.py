@@ -1,4 +1,5 @@
 import logging
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -464,7 +465,6 @@ class GuardExitAttack(BaseAttack):
             for which at least one candidate survived the pre-filters.
         """
         results: List[DeanonymizationResult] = []
-        threshold = self.config.correlation_thresholds.get("cross_correlation", 0.7)
 
         sorted_exits, exit_starts = self._build_exit_index(exit_profiles)
 
@@ -484,34 +484,28 @@ class GuardExitAttack(BaseAttack):
 
             candidate_scores: List[Tuple[str, float]] = []
             for e_prof in candidates:
-                score, _ = self._correlate_and_decide(g_prof, e_prof)
-                candidate_scores.append((e_prof.circuit_id, score))
+                score, matches = self._correlate_and_decide(g_prof, e_prof)
+                if matches:
+                    candidate_scores.append((e_prof.circuit_id, score))
 
             candidate_scores.sort(key=lambda x: x[1], reverse=True)
-            best_cid, best_score = candidate_scores[0]
+            best_cid, best_score = candidate_scores[0] if candidate_scores else None, None
 
-            best_canon = ground_truth.get(best_cid)
-            same_circuit = (
-                    g_canon is not None
+            best_canon = ground_truth.get(str(best_cid), None)
+            successful = (
+                    best_cid is not None
+                    and g_canon is not None
                     and best_canon is not None
                     and g_canon == best_canon
             )
 
-            if self.ge_config.require_top_rank:
-                successful = best_score >= threshold and same_circuit
-            else:
-                above_threshold = [
-                    (cid, sc) for cid, sc in candidate_scores
-                    if sc >= threshold
-                ]
-                successful = bool(above_threshold) and same_circuit
-                if above_threshold:
-                    best_cid, best_score = above_threshold[0]
-
-            predicted_exit_fp = (
-                ground_truth.get(best_cid, {}).get("exit")
+            predicted_exit_name = (
+                best_canon.get("exit")
                 if successful else None
             )
+
+            corr_score = best_score if best_score else 0
+            confidence = 1 / (1 + math.exp(-corr_score)) if best_score else 0
 
             results.append(
                 DeanonymizationResult(
@@ -520,9 +514,9 @@ class GuardExitAttack(BaseAttack):
                     true_guard=true_guard,
                     true_exit=true_exit,
                     predicted_guard=true_guard if g_canon else None,
-                    predicted_exit=predicted_exit_fp,
-                    confidence=float(np.clip(best_score, 0, 1)),
-                    correlation_score=best_score,
+                    predicted_exit=predicted_exit_name,
+                    confidence=confidence,
+                    correlation_score=corr_score,
                     time_to_identify=time.perf_counter() - t_start,
                     successful=successful,
                 )

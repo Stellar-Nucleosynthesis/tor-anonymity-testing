@@ -60,18 +60,16 @@ class SimulationOrchestrator:
         setup_logging("INFO")
         self.logger = logging.getLogger('SimulationOrchestrator')
 
-        self.staged_data_dir = self.workspace / "staged_data"
-        self.staged_data_dir.mkdir(exist_ok=True)
-
     def stage_network_data(
             self,
+            output_dir: Path,
             consensus_dir: Path,
             server_desc_dir: Path,
             userstats_file: Path,
             tmodel_dir: Path,
             onionperf_data: Optional[Path] = None,
             bandwidth_data: Optional[Path] = None,
-            geoip_path: Optional[Path] = None
+            geoip_path: Optional[Path] = None,
     ) -> Dict[str, Path]:
         """
         Run tornettools stage to process Tor network data.
@@ -80,6 +78,7 @@ class SimulationOrchestrator:
         to create staged files for network generation.
 
         Args:
+            output_dir: Output directory for staged files
             consensus_dir: Directory with consensus files (e.g., consensuses-2023-04/)
             server_desc_dir: Directory with server descriptors
             userstats_file: CSV file with user statistics
@@ -100,7 +99,7 @@ class SimulationOrchestrator:
             str(server_desc_dir),
             str(userstats_file),
             str(tmodel_dir),
-            '--prefix', str(self.staged_data_dir),
+            '--prefix', str(output_dir),
         ]
 
         if onionperf_data:
@@ -133,13 +132,13 @@ class SimulationOrchestrator:
                 'tor_metrics': None
             }
 
-            for file in self.staged_data_dir.glob('relayinfo_*.json'):
+            for file in output_dir.glob('relayinfo_*.json'):
                 staged_files['relayinfo'] = file
-            for file in self.staged_data_dir.glob('userinfo_*.json'):
+            for file in output_dir.glob('userinfo_*.json'):
                 staged_files['userinfo'] = file
-            for file in self.staged_data_dir.glob('networkinfo_*.gml'):
+            for file in output_dir.glob('networkinfo_*.gml'):
                 staged_files['networkinfo'] = file
-            for file in self.staged_data_dir.glob('tor_metrics_*.json'):
+            for file in output_dir.glob('tor_metrics_*.json'):
                 staged_files['tor_metrics'] = file
 
             self.logger.info(f"Staged files: {staged_files}")
@@ -517,6 +516,7 @@ class SimulationOrchestrator:
 
         self.logger.info("Step 1/5: Staging network data...")
         staged_files = self.stage_network_data(
+            output_dir=self.workspace / "staged_data",
             consensus_dir=consensus_dir,
             server_desc_dir=server_desc_dir,
             userstats_file=userstats_file,

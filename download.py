@@ -80,7 +80,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     _configure_logging(args.log_level)
 
     try:
-        import prepare_tor_data as ptd
+        from fetching import prepare_tor_data as ptd
     except ImportError as exc:
         logger.error(
             "Cannot import prepare_tor_data.py — "

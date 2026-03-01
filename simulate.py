@@ -250,6 +250,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("─" * 60)
     try:
         staged = orc_stage.stage_network_data(
+            output_dir=stage_workspace,
             consensus_dir=consensus_dir,
             server_desc_dir=server_desc_dir,
             userstats_file=userstats_file,

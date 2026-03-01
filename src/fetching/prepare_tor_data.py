@@ -116,7 +116,7 @@ def main():
     parser.add_argument(
         '--output',
         type=Path,
-        default=Path('data'),
+        default=Path('../../data'),
         help='Output directory for downloaded data (default: data/)'
     )
     parser.add_argument(

@@ -1,9 +1,11 @@
+import dataclasses
+
 import numpy as np
 from scipy import signal
 from scipy.spatial.distance import euclidean
 from fastdtw import fastdtw
-from typing import Dict, List, Tuple, Optional, Any
-from dataclasses import dataclass
+from typing import Dict, List, Tuple, Any
+from dataclasses import dataclass, field
 import logging
 
 
@@ -91,10 +93,12 @@ def flow_fingerprint(profile: TrafficProfile) -> np.ndarray:
     return np.array(features)
 
 
-def bin_traffic(profile: TrafficProfile,
-                start_time: float,
-                bin_size: float,
-                num_bins: int) -> np.ndarray:
+def bin_traffic(
+        profile: TrafficProfile,
+        start_time: float,
+        bin_size: float,
+        num_bins: int
+) -> np.ndarray:
     """
     Bin traffic into time windows.
 
@@ -117,9 +121,11 @@ def bin_traffic(profile: TrafficProfile,
     return bins
 
 
-def cross_correlation(profile1: TrafficProfile,
-                      profile2: TrafficProfile,
-                      normalize: bool = True) -> Tuple[float, float]:
+def cross_correlation(
+        profile1: TrafficProfile,
+        profile2: TrafficProfile,
+        normalize: bool = True
+) -> Tuple[float, float]:
     """
     Compute cross-correlation between two traffic profiles.
 
@@ -155,9 +161,11 @@ def cross_correlation(profile1: TrafficProfile,
     return float(peak_corr), float(lag)
 
 
-def time_shift_search(profile1: TrafficProfile,
-                      profile2: TrafficProfile,
-                      max_shift: float = 5.0) -> Tuple[float, float]:
+def time_shift_search(
+        profile1: TrafficProfile,
+        profile2: TrafficProfile,
+        max_shift: float = 5.0
+) -> Tuple[float, float]:
     """
     Search for optimal time shift between profiles.
 
@@ -197,60 +205,76 @@ def time_shift_search(profile1: TrafficProfile,
     return float(best_corr), float(best_shift)
 
 
+@dataclass
+class CorrelationConfig:
+    methods: List[str] = field(default_factory=lambda: ["cross_correlation"])
+    primary: str | None = None
+    time_window: float = 300.0
+    thresholds: Dict[str, float] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CorrelationConfig":
+        known = {f.name for f in dataclasses.fields(cls)}
+        base = {k: v for k, v in d.items() if k in known and k != "extra"}
+        extra = {k: v for k, v in d.items() if k not in known}
+        return cls(**base, extra=extra)
+
+
 class CorrelationAnalyzer:
     """
     Analyzes traffic patterns to identify correlations between
     different observation points.
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: CorrelationConfig):
         """
         Initialize correlation analyzer.
 
         Args:
-            config: Correlation configuration from scenario YAML
+            config: Correlation configuration
         """
         self.config = config
-        self.methods = config.get('methods', ['cross_correlation'])
-        self.time_window = config.get('time_window', 300)
-        self.thresholds = config.get('thresholds', {})
-        self.logger = logging.getLogger('CorrelationAnalyzer')
+        self.methods = list(config.methods)
+        self.primary = config.primary
+        if self.primary and self.primary not in self.methods:
+            self.methods.append(self.primary)
+        self.time_window = config.time_window
+        self.thresholds = config.thresholds
+        self.logger = logging.getLogger("CorrelationAnalyzer")
 
-    def correlate_profiles(self,
-                           profile1: TrafficProfile,
-                           profile2: TrafficProfile,
-                           methods: Optional[List[str]] = None) -> Dict[str, float]:
+    def correlate_profiles(
+            self,
+            profile1: TrafficProfile,
+            profile2: TrafficProfile
+    ) -> Dict[str, float]:
         """
         Correlate two profiles using configured methods.
 
         Args:
             profile1: First traffic profile
             profile2: Second traffic profile
-            methods: List of methods to use (if None, use all configured)
 
         Returns:
             Dictionary of correlation scores by method
         """
-        if methods is None:
-            methods = self.methods
-
         results = {}
 
-        if 'cross_correlation' in methods:
+        if 'cross_correlation' in self.methods:
             corr, lag = cross_correlation(profile1, profile2)
             results['cross_correlation'] = corr
             results['cross_correlation_lag'] = lag
 
-        if 'time_shift_search' in methods:
+        if 'time_shift_search' in self.methods:
             corr, shift = time_shift_search(profile1, profile2)
             results['time_shift_correlation'] = corr
             results['optimal_shift'] = shift
 
-        if 'dtw' in methods:
+        if 'dtw' in self.methods:
             distance = dtw_distance(profile1, profile2)
             results['dtw_distance'] = distance
 
-        if 'flow_fingerprinting' in methods:
+        if 'flow_fingerprinting' in self.methods:
             fp1 = flow_fingerprint(profile1)
             fp2 = flow_fingerprint(profile2)
             similarity = np.dot(fp1, fp2) / (np.linalg.norm(fp1) * np.linalg.norm(fp2))
@@ -258,7 +282,10 @@ class CorrelationAnalyzer:
 
         return results
 
-    def is_match(self, correlation_scores: Dict[str, float]) -> bool:
+    def is_match(
+            self,
+            correlation_scores: Dict[str, float]
+    ) -> Tuple[float, bool]:
         """
         Determine if correlation scores indicate a match.
 
@@ -266,20 +293,26 @@ class CorrelationAnalyzer:
             correlation_scores: Dictionary of correlation scores
 
         Returns:
-            True if profiles match according to thresholds
+            A tuple of ``(score, is_match)`` where ``score`` is
+            correlation coefficient, and ``is_match`` is ``True``
+            when all configured thresholds are satisfied.
         """
+        prim_score = correlation_scores.get(self.primary, 0)
         for method, score in correlation_scores.items():
             if method == 'cross_correlation':
-                if score < self.thresholds.get('cross_correlation', 0.7):
-                    return False
+                if score < self.thresholds.get('cross_correlation', 0.9):
+                    return prim_score, False
             elif method == 'dtw_distance':
                 if score > self.thresholds.get('dtw_distance', 100):
-                    return False
+                    return prim_score, False
             elif method == 'optimal_shift':
                 if abs(score) > self.thresholds.get('time_shift_max', 5.0):
-                    return False
+                    return prim_score, False
+            elif method == 'flow_fingerprinting':
+                if abs(score) > self.thresholds.get('flow_fingerprinting', 5.0):
+                    return prim_score, False
 
-        return True
+        return prim_score, True
 
     def batch_correlate(self,
                         entry_profiles: List[TrafficProfile],

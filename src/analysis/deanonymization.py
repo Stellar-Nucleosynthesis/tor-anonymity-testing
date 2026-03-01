@@ -54,23 +54,20 @@ def compute_time_to_deanonymize(results: List[DeanonymizationResult]) -> Dict[st
 
 
 def evaluate_attack(
-        results: List[DeanonymizationResult],
-        correlation_threshold: float = 0.7
+        results: List[DeanonymizationResult]
 ) -> Dict[str, any]:
     """
     Comprehensive evaluation of an attack.
 
     Args:
         results: List of deanonymization results
-        correlation_threshold: Threshold for considering a match
 
     Returns:
         Dictionary with all metrics
     """
-    y_true = np.array([1 if r.successful else 0 for r in results])
+    y_true = np.array([int(r.successful == r.decision) for r in results])
     y_scores = np.array([r.correlation_score for r in results])
-    y_pred = np.array([1 if r.correlation_score >= correlation_threshold else 0
-                       for r in results])
+    y_pred = np.array([1 if r.decision else 0 for r in results])
 
     metrics = {}
 
