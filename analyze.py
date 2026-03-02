@@ -644,16 +644,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             continue
 
         total_observed = result.extra_info.get("total_guard_profiles_observed")
-        result.metrics = evaluate_attack(
-            result.deanon_results,
-            total_observed=total_observed,
-        )
+        result.metrics = evaluate_attack(result.deanon_results)
         per_seed_id_metrics: List[Dict[str, Any]] = []
         for seed_total, seed_results_group in _group_by_seed(
             result.deanon_results
         ):
             per_seed_id_metrics.append(
-                evaluate_attack(seed_results_group, total_observed=seed_total)
+                evaluate_attack(seed_results_group)
             )
 
         results[key]      = result
@@ -663,8 +660,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         sweeps[key] = compute_threshold_sweep(
             result.deanon_results,
-            total_observed=total_observed,
-            n_thresholds=global_args.sweep_thresholds,
+            n_thresholds=global_args.sweep_thresholds
         )
 
     elapsed = time.perf_counter() - t0

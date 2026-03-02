@@ -17,4 +17,6 @@ ENV/
 build/
 dist/
 data/
+runs/
+results/
 workspace/

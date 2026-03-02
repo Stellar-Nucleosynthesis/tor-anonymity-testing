@@ -260,7 +260,7 @@ class CorrelationAnalyzer:
             return cross_correlation(profile1, profile2)
 
         if 'time_shift_search' == self.method:
-            return time_shift_search(profile1, profile2)
+            return time_shift_search(profile1, profile2, self.time_window)
 
         if 'dtw' == self.method:
             distance = dtw_distance(profile1, profile2)

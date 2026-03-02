@@ -464,6 +464,16 @@ class GuardExitAttack(BaseAttack):
                     candidate_scores.append((e_prof.circuit_id, score))
 
             if not candidate_scores:
+                results.append(
+                    DeanonymizationResult(
+                        client_id=f"client_seed{seed}_{g_prof.circuit_id}",
+                        circuit_id=g_prof.circuit_id,
+                        true_guard=true_guard,
+                        true_exit=true_exit,
+                        attempted=False,
+                        successful=False,
+                    )
+                )
                 continue
 
             candidate_scores.sort(key=lambda x: x[1], reverse=True)
@@ -494,6 +504,7 @@ class GuardExitAttack(BaseAttack):
                     confidence=confidence,
                     correlation_score=best_score,
                     time_to_identify=time.perf_counter() - t_start,
+                    attempted=True,
                     successful=successful,
                 )
             )
@@ -567,6 +578,7 @@ class GuardExitAttack(BaseAttack):
                     confidence=float(np.clip(score + rng.normal(0, 0.05), 0, 1)),
                     correlation_score=score,
                     time_to_identify=float(rng.exponential(0.5)),
+                    attempted=True,
                     successful=successful,
                 )
             )

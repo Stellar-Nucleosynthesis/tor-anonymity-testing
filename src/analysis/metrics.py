@@ -2,17 +2,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 
-def compute_identification_metrics(
-    results: List[Any],
-    total_observed: Optional[int] = None,
-) -> Dict[str, Any]:
+def compute_identification_metrics(results: List[Any],) -> Dict[str, Any]:
     """Compute primary top-1 identification metrics.
 
     Args:
         results: List of ``DeanonymizationResult`` objects.
-        total_observed: Total guard profiles given to the attack before
-            candidate pre-filtering.  When ``None``, ``len(results)`` is used
-            as the denominator, so ``coverage = 1.0``.
 
     Returns:
         Flat dict with the following keys:
@@ -22,18 +16,20 @@ def compute_identification_metrics(
         mean_score_correct, mean_score_incorrect, score_separation.
     """
     if not results:
-        return _empty_identification_metrics(total_observed or 0)
+        return _empty_identification_metrics()
 
-    n_total = total_observed if total_observed is not None else len(results)
-    n_attempted = len(results)
-    n_correct = sum(1 for r in results if r.successful)
+    attempted = [r for r in results if r.attempted]
+
+    n_total = len(results)
+    n_attempted = len(attempted)
+    n_correct = sum(1 for r in attempted if r.successful)
 
     coverage = n_attempted / n_total if n_total > 0 else 0.0
     conditional_accuracy = n_correct / n_attempted if n_attempted > 0 else 0.0
     success_rate = n_correct / n_total if n_total > 0 else 0.0
 
-    scores_correct = [r.correlation_score for r in results if r.successful]
-    scores_incorrect = [r.correlation_score for r in results if not r.successful]
+    scores_correct = [r.correlation_score for r in attempted if r.successful]
+    scores_incorrect = [r.correlation_score for r in attempted if not r.successful]
     mean_correct = float(np.mean(scores_correct)) if scores_correct else 0.0
     mean_incorrect = float(np.mean(scores_incorrect)) if scores_incorrect else 0.0
 
@@ -68,6 +64,8 @@ def compute_timing_metrics(results: List[Any]) -> Dict[str, float]:
     if not results:
         return {k: 0.0 for k in _timing_keys()}
 
+    results = [r for r in results if r.attempted]
+
     times_all = np.array([r.time_to_identify for r in results])
     times_correct = np.array([r.time_to_identify for r in results if r.successful])
 
@@ -90,7 +88,6 @@ def compute_timing_metrics(results: List[Any]) -> Dict[str, float]:
 
 def compute_threshold_sweep(
     results: List[Any],
-    total_observed: Optional[int] = None,
     n_thresholds: int = 100,
     threshold_range: Optional[Tuple[float, float]] = None,
 ) -> List[Dict[str, float]]:
@@ -106,8 +103,6 @@ def compute_threshold_sweep(
         results: List of ``DeanonymizationResult`` objects, each carrying
             ``correlation_score`` (score at the chosen threshold) and
             ``successful``.
-        total_observed: Total guard profiles before pre-filtering.
-            Defaults to ``len(results)``.
         n_thresholds: Number of evenly-spaced threshold values to evaluate.
         threshold_range: ``(lo, hi)`` override.  Defaults to the score range
             in *results* padded by 1 % on each side.
@@ -120,7 +115,8 @@ def compute_threshold_sweep(
     if not results:
         return []
 
-    n_total = total_observed if total_observed is not None else len(results)
+    n_total = len(results)
+    results = [r for r in results if r.attempted]
     scores  = np.array([r.correlation_score for r in results])
 
     if threshold_range is not None:
@@ -273,9 +269,9 @@ def statistical_significance(
     }
 
 
-def _empty_identification_metrics(total_observed: int) -> Dict[str, Any]:
+def _empty_identification_metrics() -> Dict[str, Any]:
     return {
-        "total_observed":       total_observed,
+        "total_observed":       0,
         "attempted":            0,
         "correct":              0,
         "success_rate":         0.0,
