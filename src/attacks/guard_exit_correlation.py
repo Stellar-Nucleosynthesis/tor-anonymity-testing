@@ -382,7 +382,7 @@ class GuardExitAttack(BaseAttack):
         """
         import bisect as _bisect
 
-        lag = self.ge_config.time_window
+        lag = self.ge_config.time_window * 10
         lo_time = g_prof.first_packet_time - lag
         hi_time = g_prof.last_packet_time + lag
 
@@ -431,7 +431,7 @@ class GuardExitAttack(BaseAttack):
             exit_profiles: Traffic profiles observed at adversary exit relays,
                 as returned by ``_load_profiles_from_oniontrace``.
             ground_truth: Mapping of ``"hostname/local_cid"`` to relay
-                fingerprint dicts, as returned by ``_build_ground_truth``.
+                hostname dicts, as returned by ``_build_ground_truth``.
             seed: Seed index embedded in ``DeanonymizationResult.client_id``
                 for traceability.
 
@@ -445,6 +445,8 @@ class GuardExitAttack(BaseAttack):
 
         total_candidates = 0
 
+        falsely_filtered = 0
+        falsely_evaluated = 0
         for g_prof in guard_profiles:
             t_start = time.perf_counter()
             g_canon = ground_truth.get(g_prof.circuit_id)
@@ -453,6 +455,11 @@ class GuardExitAttack(BaseAttack):
 
             candidates = self._candidates_for_guard(g_prof, sorted_exits, exit_starts)
             total_candidates += len(candidates)
+
+            falsely_discarded_real = False
+            if true_exit not in [(ground_truth.get(c.circuit_id) or {}).get("exit", "unknown") for c in candidates]:
+                falsely_discarded_real = True
+                falsely_filtered += 1
 
             if not candidates:
                 continue
@@ -486,6 +493,9 @@ class GuardExitAttack(BaseAttack):
                     and g_canon == best_canon
             )
 
+            if not successful and not falsely_discarded_real:
+                falsely_evaluated += 1
+
             predicted_exit_name = (
                 best_canon.get("exit")
                 if successful else None
@@ -515,6 +525,14 @@ class GuardExitAttack(BaseAttack):
             len(guard_profiles), len(exit_profiles),
             total_candidates, total_candidates / max(len(guard_profiles), 1),
                               len(guard_profiles) * len(exit_profiles),
+        )
+        self.logger.debug(
+            f"Falsely discarded true exits for {falsely_filtered} guard profile(s) "
+            f"({falsely_filtered/len(guard_profiles):.2%}) during filtering"
+        )
+        self.logger.debug(
+            f"Falsely discarded true exits for {falsely_evaluated} guard profile(s) "
+            f"({falsely_evaluated / len(guard_profiles):.2%}) during evaluation"
         )
         return results
 

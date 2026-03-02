@@ -264,7 +264,7 @@ class CorrelationAnalyzer:
 
         if 'dtw' == self.method:
             distance = dtw_distance(profile1, profile2)
-            return 1 / distance, distance
+            return 1 / (distance + 1e-9), distance
 
         raise ValueError("Unknown correlation method: {}".format(self.method))
 
