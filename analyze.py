@@ -210,17 +210,6 @@ _VALID_METHODS = frozenset({
 })
 
 
-def _method_list(value: str) -> List[str]:
-    methods = [m.strip() for m in value.split(",") if m.strip()]
-    unknown = set(methods) - _VALID_METHODS
-    if unknown:
-        raise argparse.ArgumentTypeError(
-            f"unknown method(s): {', '.join(sorted(unknown))}. "
-            f"Valid: {', '.join(sorted(_VALID_METHODS))}"
-        )
-    return methods
-
-
 def _positive_fraction(value: str) -> float:
     f = float(value)
     if not 0 < f <= 1:
@@ -251,12 +240,12 @@ def _add_guard_exit_args(p: argparse.ArgumentParser) -> None:
         help="Fraction of middle relays controlled by the adversary (default: 0).",
     )
     p.add_argument(
-        "--methods",
-        metavar="METHOD[,METHOD…]",
-        type=_method_list,
-        default=["cross_correlation"],
+        "--method",
+        metavar="METHOD",
+        type=str,
+        default="cross_correlation",
         help=(
-            "Correlation methods, comma-separated. "
+            "Traffic correlation method."
             f"Available: {', '.join(sorted(_VALID_METHODS))} "
             "(default: cross_correlation)."
         ),
@@ -266,7 +255,7 @@ def _add_guard_exit_args(p: argparse.ArgumentParser) -> None:
         metavar="FLOAT",
         type=float,
         default=0.70,
-        help="Cross-correlation decision threshold (default: 0.70).",
+        help="Correlation decision threshold (default: 0.70).",
     )
     p.add_argument(
         "--max-time-lag",
@@ -276,11 +265,14 @@ def _add_guard_exit_args(p: argparse.ArgumentParser) -> None:
         help="Maximum time-lag searched during correlation (default: 5.0).",
     )
     p.add_argument(
-        "--require-top-rank",
-        metavar="BOOL",
-        type=lambda v: v.lower() not in ("false", "0", "no"),
-        default=True,
-        help="Require correct exit to rank first (true/false, default: true).",
+        "--bin-size",
+        metavar="SECONDS",
+        type=float,
+        default=1.0,
+        help=(
+            "Width in seconds of each time bin used for traffic "
+            "histogramming."
+        ),
     )
     p.add_argument(
         "--label",
@@ -315,14 +307,10 @@ def _build_guard_exit_config(args: argparse.Namespace, num_seeds: int) -> Any:
         adversary_exit_fraction=args.exit_fraction,
         adversary_middle_fraction=args.middle_fraction,
         num_seeds=num_seeds,
-        correlation_methods=list(args.methods),
-        primary_method="cross_correlation",
-        correlation_thresholds={
-            "cross_correlation": args.threshold
-        },
-        max_time_lag=args.max_time_lag,
-        use_all_methods=len(args.methods) > 1,
-        require_top_rank=args.require_top_rank,
+        correlation_method=args.method,
+        correlation_threshold=args.threshold,
+        time_window=args.max_time_lag,
+        bin_size=args.bin_size,
     )
 
 def _resolve_sim_dirs(

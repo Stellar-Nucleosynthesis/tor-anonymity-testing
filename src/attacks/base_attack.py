@@ -32,10 +32,11 @@ class AttackConfig:
         adversary_middle_fraction: Fraction of middle relays controlled by
             the adversary, in the range [0, 1].
         num_seeds: Number of independent simulation seeds to average over.
-        correlation_methods: Ordered list of method names passed to
-            ``CorrelationAnalyzer``.
-        correlation_thresholds: Per-method decision thresholds passed to
-            ``CorrelationAnalyzer``.
+        correlation_method: A method names passed to ``CorrelationAnalyzer``.
+        correlation_threshold: Decision thresholds passed to ``CorrelationAnalyzer``.
+        time_window: Correlation time window passed to ``CorrelationAnalyzer``.
+        bin_size: Width in seconds of each time bin used for traffic
+            histogramming.
         extra: Free-form dict for scenario-specific parameters that do not
             belong to the common fields.
     """
@@ -46,13 +47,10 @@ class AttackConfig:
     adversary_exit_fraction: float = 0.10
     adversary_middle_fraction: float = 0.0
     num_seeds: int = 3
-    correlation_methods: List[str] = field(
-        default_factory=lambda: ["cross_correlation"]
-    )
-    primary_method: str = "cross_correlation"
-    correlation_thresholds: Dict[str, float] = field(
-        default_factory=lambda: {"cross_correlation": 0.9}
-    )
+    correlation_method: str = "cross_correlation"
+    correlation_threshold: float = 0.9
+    time_window: float = 30
+    bin_size: float = 0.1
     extra: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -90,7 +88,7 @@ class AttackResult:
         deanon_results: One ``DeanonymizationResult`` per circuit, aggregated
             across all seeds.
         metrics: Flat metrics dict produced by ``evaluate_attack`` (keys such
-            as ``roc_auc``, ``f1_score``, ``success_rate``).
+            as ``success_rate``, ``coverage``, ``conditional_accuracy``).
         per_seed_metrics: Per-seed metric dicts for variance analysis.
         elapsed_seconds: Wall-clock seconds for the complete ``run`` call.
         extra_info: Arbitrary metadata populated by the subclass via
@@ -107,34 +105,34 @@ class AttackResult:
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
     @property
-    def roc_auc(self) -> float:
-        """float: ROC-AUC score, or 0.0 if not yet computed."""
-        return float(self.metrics.get("roc_auc", 0.0))
-
-    @property
-    def f1_score(self) -> float:
-        """float: F1 score, or 0.0 if not yet computed."""
-        return float(self.metrics.get("f1_score", 0.0))
-
-    @property
     def success_rate(self) -> float:
         """float: Fraction of circuits successfully deanonymized."""
         return float(self.metrics.get("success_rate", 0.0))
+
+    @property
+    def coverage(self) -> float:
+        """coverage: Fraction of circuits For which a prediction was made."""
+        return float(self.metrics.get("coverage", 0.0))
+
+    @property
+    def conditional_accuracy(self) -> float:
+        """float: Accuracy of deanonymization attempts."""
+        return float(self.metrics.get("conditional_accuracy", 0.0))
 
     def summary(self) -> str:
         """Return a compact multi-line summary string suitable for logging.
 
         Returns:
             A newline-joined string with attack name, circuit count, seed
-            count, ROC-AUC, F1, success rate, and elapsed time.
+            count, success rate, coverage, conditional accuracy.
         """
         lines = [
             f"Attack : {self.attack_name} — {self.scenario_label}",
             f"Circuits: {len(self.deanon_results)}  "
             f"Seeds: {self.config.num_seeds}",
-            f"ROC-AUC : {self.roc_auc:.4f}",
-            f"F1      : {self.f1_score:.4f}",
             f"Success : {self.success_rate:.2%}",
+            f"Coverage : {self.coverage:.2%}",
+            f"Conditional accuracy : {self.conditional_accuracy:.2%}",
             f"Time    : {self.elapsed_seconds:.1f}s",
         ]
         return "\n".join(lines)
@@ -178,18 +176,18 @@ class BaseAttack(abc.ABC):
 
         Args:
             config: Scenario configuration including adversary fractions,
-                correlation methods, and seed count.
+                correlation method, and seed count.
             workspace: Root directory for intermediate files. Defaults to
                 ``./workspace`` relative to the current working directory.
         """
         self.config = config
         self.workspace = Path(workspace) if workspace else Path("./workspace")
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
-        analyzer_conf = CorrelationConfig.from_dict({
-                "methods": config.correlation_methods,
-                "thresholds": config.correlation_thresholds,
-                "primary": config.primary_method
-            })
+        analyzer_conf = CorrelationConfig(
+            method=config.correlation_method,
+            time_window=config.time_window,
+            threshold=config.correlation_threshold
+        )
         self._analyzer = CorrelationAnalyzer(analyzer_conf)
 
 
@@ -205,6 +203,7 @@ class BaseAttack(abc.ABC):
         """
         self.config.extra.update(kwargs)
         self.logger.debug(f"{self.ATTACK_NAME}.configure() called with %s", kwargs)
+
 
     def run(self, simulation_dirs: List[Path], *, label: str = "") -> AttackResult:
         """Execute the attack across all provided simulation output directories.
@@ -506,8 +505,8 @@ class BaseAttack(abc.ABC):
             correlation coefficient in [0, 1] and ``is_match`` is ``True``
             when all configured thresholds are satisfied.
         """
-        scores = self._analyzer.correlate_profiles(guard_profile, exit_profile)
-        return self._analyzer.is_match(scores)
+        score, lag = self._analyzer.correlate_profiles(guard_profile, exit_profile)
+        return score, self._analyzer.is_match(score, lag)
 
     def _extra_info(self) -> Dict[str, Any]:
         """Return additional metadata to include in ``AttackResult.extra_info``.

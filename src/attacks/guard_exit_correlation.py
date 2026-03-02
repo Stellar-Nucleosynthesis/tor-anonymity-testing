@@ -22,26 +22,7 @@ logger = logging.getLogger("GuardExit")
 @dataclass
 class GuardExitConfig(AttackConfig):
     """Configuration for the Guard + Exit correlation attack.
-
-    Extends ``AttackConfig`` with scenario-specific knobs for time-lag search,
-    traffic binning, and matching strategy.
-
-    Attributes:
-        max_time_lag: Maximum time-lag in seconds considered during the
-            correlation search window.
-        bin_size: Width in seconds of each time bin used for traffic
-            histogramming.
-        use_all_methods: When ``True``, all configured correlation methods are
-            applied; when ``False``, only cross-correlation is used.
-        require_top_rank: When ``True``, deanonymization is declared successful
-            only when the correct pair is the top-ranked candidate. When
-            ``False``, any candidate whose score exceeds the threshold counts.
     """
-
-    max_time_lag: float = 5.0
-    bin_size: float = 0.1
-    use_all_methods: bool = True
-    require_top_rank: bool = True
 
 
 class GuardExitAttack(BaseAttack):
@@ -75,9 +56,6 @@ class GuardExitAttack(BaseAttack):
     ):
         """Initialize the attack.
 
-        Ensures ``cross_correlation`` is always the first method in
-        ``config.correlation_methods`` since it is used as the primary score.
-
         Args:
             config: Guard+Exit-specific scenario configuration.
             workspace: Root directory for intermediate files. Defaults to
@@ -85,9 +63,6 @@ class GuardExitAttack(BaseAttack):
             synthetic: When ``True``, missing Shadow host directories trigger
                 synthetic result generation instead of an empty return.
         """
-        if "cross_correlation" not in config.correlation_methods:
-            config.correlation_methods.insert(0, "cross_correlation")
-
         super().__init__(config, workspace)
         self.ge_config: GuardExitConfig = config
         self.synthetic = synthetic
@@ -275,7 +250,7 @@ class GuardExitAttack(BaseAttack):
         Returns:
             A dict mapping ``"hostname/local_cid"`` strings to inner dicts
             with keys ``"guard"``, ``"middle"``, and ``"exit"``, each holding
-            a relay hoctname string. Returns an empty dict
+            a relay hostname string. Returns an empty dict
             when no ``CIRC BUILT`` events are found.
         """
         ground_truth: Dict[str, Dict[str, str]] = {}
@@ -407,7 +382,7 @@ class GuardExitAttack(BaseAttack):
         """
         import bisect as _bisect
 
-        lag = self.ge_config.max_time_lag
+        lag = self.ge_config.time_window
         lo_time = g_prof.first_packet_time - lag
         hi_time = g_prof.last_packet_time + lag
 
@@ -488,13 +463,15 @@ class GuardExitAttack(BaseAttack):
                 if matches:
                     candidate_scores.append((e_prof.circuit_id, score))
 
-            candidate_scores.sort(key=lambda x: x[1], reverse=True)
-            best_cid, best_score = candidate_scores[0] if candidate_scores else None, None
+            if not candidate_scores:
+                continue
 
-            best_canon = ground_truth.get(str(best_cid), None)
+            candidate_scores.sort(key=lambda x: x[1], reverse=True)
+            best_cid, best_score = candidate_scores[0]
+
+            best_canon = ground_truth.get(best_cid)
             successful = (
-                    best_cid is not None
-                    and g_canon is not None
+                    g_canon is not None
                     and best_canon is not None
                     and g_canon == best_canon
             )
@@ -504,8 +481,7 @@ class GuardExitAttack(BaseAttack):
                 if successful else None
             )
 
-            corr_score = best_score if best_score else 0
-            confidence = 1 / (1 + math.exp(-corr_score)) if best_score else 0
+            confidence = 1 / (1 + math.exp(-best_score))
 
             results.append(
                 DeanonymizationResult(
@@ -516,7 +492,7 @@ class GuardExitAttack(BaseAttack):
                     predicted_guard=true_guard if g_canon else None,
                     predicted_exit=predicted_exit_name,
                     confidence=confidence,
-                    correlation_score=corr_score,
+                    correlation_score=best_score,
                     time_to_identify=time.perf_counter() - t_start,
                     successful=successful,
                 )
@@ -573,9 +549,7 @@ class GuardExitAttack(BaseAttack):
             else:
                 score = float(np.clip(rng.normal(0.35, 0.15), 0, 1))
 
-            threshold = self.config.correlation_thresholds.get(
-                "cross_correlation", 0.7
-            )
+            threshold = 0.7
             successful = is_compromised and score >= threshold
 
             results.append(
