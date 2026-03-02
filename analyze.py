@@ -1,9 +1,20 @@
 """Step 3 — Run deanonymization attack analysis on simulation output.
 
 Each attack class is a distinct deanonymization technique with its own set
-of options.  One or more attack scenarios can be specified in a single
+of options. One or more attack scenarios can be specified in a single
 invocation; when more than one is given, their results are compared side
 by side.
+
+Metrics used
+------------
+  success_rate            — fraction of all observed circuits correctly
+                            identified (unconditional).
+  coverage                — fraction of circuits for which a prediction was
+                            made (at least one candidate found).
+  conditional_accuracy    — fraction of predictions that were correct.
+  score_separation        — mean(score|correct) − mean(score|incorrect),
+                            a measure of discriminability.
+  timing                  — mean / median / p95 wall-clock seconds per circuit.
 
 Attack classes available
 ------------------------
@@ -27,13 +38,13 @@ Usage
       guard-exit --guard-fraction 0.10 --label "baseline" \\
       guard-exit --guard-fraction 0.30 --label "high adversary"
 
-  # Use multiple correlation methods
-  python analyze.py \\
-      --sim-dirs ./runs/seed_0 \\
-      guard-exit \\
-          --guard-fraction 0.10 \\
-          --methods cross_correlation,dtw,flow_fingerprinting \\
-          --threshold 0.65
+  # Generate specific plots only
+  python analyze.py --synthetic \\
+      --plots success_bar accuracy_coverage score_dist \\
+      guard-exit --guard-fraction 0.15
+
+  # Generate all available plots
+  python analyze.py --synthetic --plots all guard-exit
 """
 
 import argparse
@@ -44,13 +55,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import matplotlib
-
-from src.attacks.base_attack import AttackConfig
-
-matplotlib.use("Agg")
 
 def _configure_logging(level: str) -> None:
     logging.basicConfig(
@@ -61,6 +69,22 @@ def _configure_logging(level: str) -> None:
 
 
 logger = logging.getLogger("analyze")
+
+_ALL_PLOTS = frozenset({
+    "success_bar",          # grouped bar chart — metrics across scenarios
+    "success_line",         # line chart — metric vs. parameter sweep
+    "accuracy_coverage",    # threshold-sweep curve for each scenario
+    "score_dist",           # histogram of scores: correct vs. incorrect
+    "timing",               # timing distribution box plot
+    "seed_variance",        # box plot of per-seed success rates
+    "ge_matrix",            # guard-fraction × exit-fraction heatmap (guard-exit only)
+})
+
+_PLOT_HELP = (
+    "Plots to generate.  Pass individual names or 'all'.  "
+    f"Available: {', '.join(sorted(_ALL_PLOTS))}.  "
+    "Default: success_bar accuracy_coverage."
+)
 
 @dataclass
 class AttackEntry:
@@ -75,10 +99,10 @@ class AttackEntry:
             Signature: ``(args, num_seeds) -> config``.
         attack_cls: The ``BaseAttack`` subclass to instantiate.
     """
-    label:          str
-    add_arguments:  Callable[[argparse.ArgumentParser], None]
-    build_config:   Callable[[argparse.Namespace, int], Any]
-    attack_cls:     Type[Any]
+    label: str
+    add_arguments: Callable[[argparse.ArgumentParser], None]
+    build_config: Callable[[argparse.Namespace, int], Any]
+    attack_cls: Type[Any]
 
 ATTACK_REGISTRY: Dict[str, AttackEntry] = {}
 
@@ -87,7 +111,7 @@ def _build_global_parser() -> argparse.ArgumentParser:
     """Build the parser for global options (before any attack-type token)."""
     p = argparse.ArgumentParser(
         prog="analyze.py",
-        description="Deanonymization attack analysis.",
+        description="Deanonymization attack analysis (top-1 identification).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         add_help=False,
     )
@@ -100,8 +124,8 @@ def _build_global_parser() -> argparse.ArgumentParser:
         type=Path,
         default=[],
         help=(
-            "Shadow simulation output directories from simulate.py, one per seed "
-            "(e.g. runs/seed_0 runs/seed_1).  Omit when --synthetic is set."
+            "Shadow simulation output directories from simulate.py, one per seed. "
+            "Omit when --synthetic is set."
         ),
     )
     grp_io.add_argument(
@@ -109,22 +133,30 @@ def _build_global_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         type=Path,
         default=Path("results"),
-        help="Destination for plots, JSON summary, and metrics (default: ./results).",
+        help="Destination for plots and JSON summary (default: ./results).",
     )
     grp_io.add_argument(
         "--synthetic",
         action="store_true",
         default=False,
-        help=(
-            "Use synthetic traffic profiles instead of real OnionTrace logs. "
-            "Useful for testing without completed simulations."
-        ),
+        help="Use synthetic traffic profiles (no real logs required).",
     )
     grp_io.add_argument(
-        "--no-report",
+        "--plots",
+        nargs="+", metavar="PLOT",
+        default=["success_bar", "accuracy_coverage"],
+        help=_PLOT_HELP,
+    )
+    grp_io.add_argument(
+        "--no-plots",
         action="store_true",
         default=False,
-        help="Skip plot/report generation; metrics are still printed to stdout.",
+        help="Skip all plot generation; metrics JSON is still written.",
+    )
+    grp_io.add_argument(
+        "--sweep-thresholds",
+        metavar="N", type=int, default=100,
+        help="Number of threshold values for accuracy/coverage sweep (default: 100).",
     )
     grp_io.add_argument(
         "--log-level",
@@ -138,7 +170,6 @@ def _build_global_parser() -> argparse.ArgumentParser:
         default=False,
         help="Show this help message and exit.",
     )
-
     return p
 
 def _split_argv(
@@ -158,16 +189,8 @@ def _split_argv(
         global:   ["--synthetic"]
         segments: [("guard-exit", ["--guard-fraction", "0.10"]),
                    ("guard-exit", ["--guard-fraction", "0.30"])]
-
-    Args:
-        argv: Raw argument list (typically ``sys.argv[1:]``).
-        known_attacks: Set of registered attack-type name strings.
-
-    Returns:
-        A tuple of ``(global_argv, [(attack_name, attack_argv), …])``.
     """
     split_points = [i for i, tok in enumerate(argv) if tok in known_attacks]
-
     if not split_points:
         return argv, []
 
@@ -176,7 +199,6 @@ def _split_argv(
     for k, start in enumerate(split_points):
         end = split_points[k + 1] if k + 1 < len(split_points) else len(argv)
         segments.append((argv[start], argv[start + 1 : end]))
-
     return global_argv, segments
 
 
@@ -186,6 +208,7 @@ _VALID_METHODS = frozenset({
     "flow_fingerprinting",
     "time_shift_search",
 })
+
 
 def _method_list(value: str) -> List[str]:
     methods = [m.strip() for m in value.split(",") if m.strip()]
@@ -198,15 +221,6 @@ def _method_list(value: str) -> List[str]:
     return methods
 
 
-def _parse_float_csv(raw: str) -> List[float]:
-    try:
-        return [float(v.strip()) for v in raw.split(",") if v.strip()]
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError(
-            f"expected comma-separated numbers, got {raw!r}"
-        ) from exc
-
-
 def _positive_fraction(value: str) -> float:
     f = float(value)
     if not 0 < f <= 1:
@@ -215,7 +229,6 @@ def _positive_fraction(value: str) -> float:
 
 
 def _add_guard_exit_args(p: argparse.ArgumentParser) -> None:
-    """Register guard-exit–specific arguments on *p*."""
     p.add_argument(
         "--guard-fraction",
         metavar="FRAC",
@@ -267,33 +280,20 @@ def _add_guard_exit_args(p: argparse.ArgumentParser) -> None:
         metavar="BOOL",
         type=lambda v: v.lower() not in ("false", "0", "no"),
         default=True,
-        help=(
-            "Require the correct exit to rank first for a positive declaration "
-            "(true/false, default: true)."
-        ),
+        help="Require correct exit to rank first (true/false, default: true).",
     )
     p.add_argument(
         "--label",
         metavar="TEXT",
         default="",
         help=(
-            "Human-readable label for this scenario in plots and the JSON summary. "
-            "Defaults to a string derived from the option values."
+            "Human-readable label for this scenario in plots and JSON. "
+            "Auto-generated from option values when omitted."
         ),
     )
 
 
 def _build_guard_exit_config(args: argparse.Namespace, num_seeds: int) -> Any:
-    """Convert parsed guard-exit arguments into a ``GuardExitConfig``.
-
-    Args:
-        args: Namespace produced by the guard-exit argument parser.
-        num_seeds: Number of simulation seeds (taken from ``--sim-dirs``
-            length or 1 for synthetic mode).
-
-    Returns:
-        A ``GuardExitConfig`` instance.
-    """
     from src.attacks.guard_exit_correlation import GuardExitConfig
 
     auto_name = (
@@ -308,7 +308,6 @@ def _build_guard_exit_config(args: argparse.Namespace, num_seeds: int) -> Any:
         f"exit={args.exit_fraction*100:.0f}%  "
         f"τ={args.threshold:.2f}"
     )
-
     return GuardExitConfig(
         name=auto_name,
         description=label,
@@ -317,9 +316,9 @@ def _build_guard_exit_config(args: argparse.Namespace, num_seeds: int) -> Any:
         adversary_middle_fraction=args.middle_fraction,
         num_seeds=num_seeds,
         correlation_methods=list(args.methods),
+        primary_method="cross_correlation",
         correlation_thresholds={
-            "cross_correlation": args.threshold,
-            "dtw_distance": 100.0,
+            "cross_correlation": args.threshold
         },
         max_time_lag=args.max_time_lag,
         use_all_methods=len(args.methods) > 1,
@@ -331,22 +330,6 @@ def _resolve_sim_dirs(
     num_seeds: int,
     output_dir: Path,
 ) -> List[Path]:
-    """Return the simulation directories to use for a scenario.
-
-    When ``--sim-dirs`` are provided they are used (cycling if fewer than
-    *num_seeds*).  When ``--synthetic`` is set or no directories were given,
-    placeholder paths are returned; the attack implementation detects these
-    and falls back to synthetic data generation.
-
-    Args:
-        global_args: Parsed global namespace containing ``sim_dirs`` and
-            ``synthetic``.
-        num_seeds: Number of seed directories the scenario requires.
-        output_dir: Used as the parent for synthetic placeholder paths.
-
-    Returns:
-        A list of ``Path`` objects of length *num_seeds*.
-    """
     if global_args.sim_dirs and not global_args.synthetic:
         dirs = global_args.sim_dirs
         if len(dirs) < num_seeds:
@@ -364,28 +347,48 @@ def _resolve_sim_dirs(
 
 def _print_metric_table(metrics: Dict[str, Any]) -> None:
     rows = [
-        ("ROC-AUC",       "roc_auc"),
-        ("F1-Score",       "f1_score"),
-        ("Precision",      "precision"),
-        ("Recall",         "recall"),
-        ("Accuracy",       "accuracy"),
-        ("TPR",            "true_positive_rate"),
-        ("FPR",            "false_positive_rate"),
-        ("Success Rate",   "success_rate"),
-        ("Mean Time (s)",  "mean_time"),
-        ("TP / FP / FN",  "_confusion"),
+        ("Total observed",       "total_observed"),
+        ("Attempted",            "attempted"),
+        ("Correctly identified", "correct"),
+        ("Success rate",         "success_rate"),
+        ("Coverage",             "coverage"),
+        ("Abstention rate",      "abstention_rate"),
+        ("Conditional accuracy", "conditional_accuracy"),
+        ("Score separation",     "score_separation"),
+        ("Mean score (correct)",   "mean_score_correct"),
+        ("Mean score (incorrect)", "mean_score_incorrect"),
+        ("Mean time (s)",        "mean_time_s"),
+        ("Median time (s)",      "median_time_s"),
+        ("P95 time (s)",         "p95_time_s"),
     ]
-    print(f"\n{'Metric':<22} {'Value':>10}")
-    print("─" * 34)
+    print(f"\n  {'Metric':<28} {'Value':>10}")
+    print("  " + "─" * 34)
     for label, key in rows:
-        if key == "_confusion":
-            tp = metrics.get("true_positives",  "?")
-            fp = metrics.get("false_positives", "?")
-            fn = metrics.get("false_negatives", "?")
-            print(f"{'TP / FP / FN':<22} {tp!s:>3} / {fp!s:<3} / {fn!s}")
-        elif key in metrics:
-            v = metrics[key]
-            print(f"{label:<22} {v:>10.4f}" if isinstance(v, float) else f"{label:<22} {v!s:>10}")
+        if key not in metrics:
+            continue
+        v = metrics[key]
+        if isinstance(v, float):
+            print(f"  {label:<28} {v:>10.4f}")
+        else:
+            print(f"  {label:<28} {v!s:>10}")
+
+def _json_default(obj: Any) -> Any:
+    if isinstance(obj, np.ndarray):  return obj.tolist()
+    if isinstance(obj, np.integer):  return int(obj)
+    if isinstance(obj, np.floating): return float(obj)
+    return str(obj)
+
+
+def _resolve_plot_set(raw: List[str]) -> frozenset:
+    if "all" in raw:
+        return _ALL_PLOTS
+    unknown = set(raw) - _ALL_PLOTS
+    if unknown:
+        raise ValueError(
+            f"Unknown plot(s): {', '.join(sorted(unknown))}. "
+            f"Available: {', '.join(sorted(_ALL_PLOTS))}"
+        )
+    return frozenset(raw)
 
 
 def _save_figure(fig: plt.Figure, path: Path) -> None:
@@ -398,127 +401,152 @@ def _save_figure(fig: plt.Figure, path: Path) -> None:
         plt.close(fig)
 
 
-def _json_default(obj: Any) -> Any:
-    if isinstance(obj, np.ndarray):  return obj.tolist()
-    if isinstance(obj, np.integer):  return int(obj)
-    if isinstance(obj, np.floating): return float(obj)
-    return str(obj)
-
-
 def _render_report(
-    results:    Dict[str, Any],
-    labels:     Dict[str, str],
-    output_dir: Path,
+    results:      Dict[str, Any],
+    labels:       Dict[str, str],
+    sweeps:       Dict[str, Any],
+    deanon_map:   Dict[str, List[Any]],
+    per_seed_map: Dict[str, List[Dict[str, Any]]],
+    output_dir:   Path,
+    plot_set:     frozenset,
 ) -> None:
-    """Generate plots and a JSON summary for all collected results."""
-    if not results:
-        logger.warning("No results to render.")
-        return
+    """Generate plots and write the JSON summary.
 
-    for name, res in results.items():
+    Args:
+        results:      scenario_key → AttackResult.
+        labels:       scenario_key → display label.
+        sweeps:       scenario_key → threshold sweep list.
+        deanon_map:   scenario_key → list of DeanonymizationResult.
+        per_seed_map: scenario_key → list of per-seed metric dicts.
+        output_dir:   destination directory.
+        plot_set:     set of plot names to generate.
+    """
+    from src.analysis.metrics import compare_scenarios, compute_seed_variance
+    from src.visualization import plots as vplots
+
+    for key, res in results.items():
         print("\n" + "─" * 60)
         print(res.summary())
         _print_metric_table(res.metrics)
 
-    scenario_metrics = {labels.get(n, n): r.metrics for n, r in results.items()}
+    scenario_metrics = {labels.get(k, k): r.metrics for k, r in results.items()}
 
-    try:
-        from src.visualization.metrics_comparison import plot_metrics_comparison
-        fig = plot_metrics_comparison(
-            scenario_metrics,
-            metrics=["roc_auc", "f1_score", "precision", "recall", "success_rate"],
-        )
-        _save_figure(fig, output_dir / "metrics_comparison.png")
-    except Exception as exc:
-        logger.warning("metrics_comparison plot failed: %s", exc)
-
-    try:
-        from src.visualization.roc import plot_multiple_roc_curves
-        fig = plot_multiple_roc_curves(scenario_metrics)
-        _save_figure(fig, output_dir / "roc_comparison.png")
-    except Exception as exc:
-        logger.warning("ROC comparison plot failed: %s", exc)
-
-    for name, res in results.items():
-        if not res.deanon_results:
-            continue
+    if "success_bar" in plot_set and len(results) >= 1:
         try:
-            from src.visualization.guard_exit_correlation import plot_correlation_matrix
-            scores = [r.correlation_score for r in res.deanon_results]
-            n = min(len(scores), 20)
-            rng = np.random.default_rng(0)
-            matrix = np.zeros((n, n))
-            for i in range(n):
-                for j in range(n):
-                    matrix[i, j] = (
-                        scores[i % len(scores)] if i == j
-                        else scores[i % len(scores)] * rng.uniform(0.1, 0.5)
-                    )
-            fig = plot_correlation_matrix(
-                matrix,
-                guard_ids=[f"g{i}" for i in range(n)],
-                exit_ids=[f"e{i}" for i in range(n)],
-            )
-            _save_figure(fig, output_dir / f"{name}_correlation_matrix.png")
+            fig = vplots.plot_success_rate_bar(scenario_metrics)
+            _save_figure(fig, output_dir / "success_rate_bar.png")
+        except NotImplementedError:
+            logger.debug("plot_success_rate_bar not yet implemented — skipping.")
         except Exception as exc:
-            logger.warning("Correlation matrix for '%s' failed: %s", name, exc)
+            logger.warning("success_bar plot failed: %s", exc)
 
-    try:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        box_labels, auc_data = [], []
-        for name, res in results.items():
-            per_seed = [m.get("roc_auc", np.nan) for m in res.per_seed_metrics]
-            if per_seed:
-                box_labels.append(labels.get(name, name))
-                auc_data.append(per_seed)
-        if auc_data:
-            bp = ax.boxplot(auc_data, label=box_labels, patch_artist=True)
-            colors = plt.colormaps["tab10"](np.linspace(0, 1, len(auc_data)))
-            for patch, color in zip(bp["boxes"], colors):
-                patch.set_facecolor(color)
-                patch.set_alpha(0.7)
-            ax.set_ylabel("ROC-AUC")
-            ax.set_title("AUC Variance Across Seeds")
-            ax.grid(axis="y", alpha=0.3)
-            plt.xticks(rotation=15, ha="right")
-            plt.tight_layout()
-            _save_figure(fig, output_dir / "seed_variance.png")
+    if "accuracy_coverage" in plot_set:
+        try:
+            named_sweeps = {labels.get(k, k): sweeps[k] for k in sweeps}
+            if len(named_sweeps) == 1:
+                label, sweep = next(iter(named_sweeps.items()))
+                fig = vplots.plot_accuracy_coverage(sweep, scenario_label=label)
+                _save_figure(fig, output_dir / "accuracy_coverage.png")
+            else:
+                fig = vplots.plot_accuracy_coverage_multi(named_sweeps)
+                _save_figure(fig, output_dir / "accuracy_coverage_multi.png")
+        except NotImplementedError:
+            logger.debug("accuracy_coverage plots not yet implemented — skipping.")
+        except Exception as exc:
+            logger.warning("accuracy_coverage plot failed: %s", exc)
+
+    if "score_dist" in plot_set:
+        for key, dres in deanon_map.items():
+            try:
+                fig = vplots.plot_score_distribution(
+                    dres, title=f"Score Distribution — {labels.get(key, key)}"
+                )
+                safe = key.replace(" ", "_").replace("/", "_")
+                _save_figure(fig, output_dir / f"{safe}_score_dist.png")
+            except NotImplementedError:
+                logger.debug("plot_score_distribution not yet implemented — skipping.")
+                break
+            except Exception as exc:
+                logger.warning("score_dist for '%s' failed: %s", key, exc)
+
+    if "timing" in plot_set:
+        try:
+            fig = vplots.plot_timing_distribution(
+                {labels.get(k, k): v for k, v in deanon_map.items()}
+            )
+            _save_figure(fig, output_dir / "timing_distribution.png")
+        except NotImplementedError:
+            logger.debug("plot_timing_distribution not yet implemented — skipping.")
+        except Exception as exc:
+            logger.warning("timing plot failed: %s", exc)
+
+    if "seed_variance" in plot_set:
+        per_seed_named = {labels.get(k, k): v for k, v in per_seed_map.items() if v}
+        if per_seed_named:
+            try:
+                fig = vplots.plot_seed_variance_box(per_seed_named)
+                _save_figure(fig, output_dir / "seed_variance.png")
+            except NotImplementedError:
+                logger.debug("plot_seed_variance_box not yet implemented — skipping.")
+            except Exception as exc:
+                logger.warning("seed_variance plot failed: %s", exc)
+
+    if "ge_matrix" in plot_set:
+        ge_results = {
+            k: r for k, r in results.items()
+            if "adversary_guard_fraction" in r.extra_info
+               and "adversary_exit_fraction" in r.extra_info
+        }
+        if len(ge_results) >= 4:
+            try:
+                gf_set = sorted({r.extra_info["adversary_guard_fraction"]
+                                 for r in ge_results.values()})
+                ef_set = sorted({r.extra_info["adversary_exit_fraction"]
+                                 for r in ge_results.values()})
+                matrix = np.zeros((len(gf_set), len(ef_set)))
+                for r in ge_results.values():
+                    gi = gf_set.index(r.extra_info["adversary_guard_fraction"])
+                    ei = ef_set.index(r.extra_info["adversary_exit_fraction"])
+                    matrix[gi, ei] = r.metrics.get("success_rate", 0.0)
+                fig = vplots.plot_guard_exit_matrix(gf_set, ef_set, matrix)
+                _save_figure(fig, output_dir / "guard_exit_matrix.png")
+            except NotImplementedError:
+                logger.debug("plot_guard_exit_matrix not yet implemented — skipping.")
+            except Exception as exc:
+                logger.warning("ge_matrix plot failed: %s", exc)
         else:
-            plt.close(fig)
-    except Exception as exc:
-        logger.warning("Seed-variance plot failed: %s", exc)
+            logger.debug(
+                "ge_matrix requires ≥4 scenarios with varying guard/exit fractions "
+                "— skipping (found %d).", len(ge_results)
+            )
+
+    if len(results) > 1:
+        comp = compare_scenarios(scenario_metrics)
+        logger.info("Best scenario per metric:")
+        for metric, data in comp.get("metrics_comparison", {}).items():
+            best = data.get("best_scenario", "—")
+            val  = data.get("values", {}).get(best, "?")
+            logger.info(
+                "  %-28s → %-35s %.4f",
+                metric, best, val if isinstance(val, float) else 0,
+            )
 
     summary: Dict[str, Any] = {}
-    for name, res in results.items():
-        summary[name] = {
-            "label":           labels.get(name, name),
+    for key, res in results.items():
+        summary[key] = {
+            "label":           labels.get(key, key),
             "attack":          res.attack_name,
             "elapsed_seconds": res.elapsed_seconds,
             "num_circuits":    len(res.deanon_results),
-            "metrics": {
-                k: v for k, v in res.metrics.items()
-                if isinstance(v, (int, float, str, bool))
-            },
-            "extra_info": res.extra_info,
+            "metrics":         res.metrics,
+            "seed_variance":   compute_seed_variance(res.per_seed_metrics),
+            "extra_info":      res.extra_info,
+            "threshold_sweep": sweeps.get(key, []),
         }
+
     summary_path = output_dir / "scenario_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, default=_json_default))
     logger.info("JSON summary → %s", summary_path)
-
-    if len(results) > 1:
-        try:
-            from src.analysis.deanonymization import compare_scenarios
-            comp = compare_scenarios(scenario_metrics)
-            logger.info("Best scenario per metric:")
-            for metric, data in comp.get("metrics_comparison", {}).items():
-                best = data.get("best_scenario", "—")
-                val  = data.get("values", {}).get(best, "?")
-                logger.info(
-                    "  %-25s → %s (%.4f)", metric, best,
-                    val if isinstance(val, float) else 0,
-                )
-        except Exception as exc:
-            logger.debug("compare_scenarios skipped: %s", exc)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -535,13 +563,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("──────────────")
         hp = _build_global_parser()
         hp.add_help = True
-        hp.prog = "analyze.py"
         hp.print_usage()
         print()
-        for attack_name, entry in ATTACK_REGISTRY.items():
-            ap = argparse.ArgumentParser(prog=f"  {attack_name}", add_help=False)
+        for name, entry in ATTACK_REGISTRY.items():
+            ap = argparse.ArgumentParser(prog=f"  {name}", add_help=False)
             entry.add_arguments(ap)
-            print(f"{attack_name}  —  {entry.label}")
+            print(f"{name}  —  {entry.label}")
             print("─" * 40)
             ap.print_help()
             print()
@@ -552,28 +579,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     output_dir = global_args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scenarios: List[Tuple[str, AttackConfig, str, str]] = []
+    if global_args.no_plots:
+        plot_set: frozenset = frozenset()
+    else:
+        try:
+            plot_set = _resolve_plot_set(global_args.plots)
+        except ValueError as exc:
+            logger.error("%s", exc)
+            return 1
+
+    scenarios: List[Tuple[str, Any, str, str]] = []
 
     for idx, (attack_name, attack_argv) in enumerate(attack_segments):
         entry = ATTACK_REGISTRY[attack_name]
-
         ap = argparse.ArgumentParser(
             prog=f"{attack_name} (scenario {idx + 1})",
             add_help=True,
         )
         entry.add_arguments(ap)
-
         try:
             attack_args = ap.parse_args(attack_argv)
         except SystemExit:
             return 2
 
         num_seeds = len(global_args.sim_dirs) if global_args.sim_dirs else 1
-
         try:
             cfg = entry.build_config(attack_args, num_seeds)
         except Exception as exc:
-            logger.error("Failed to build config for scenario %d (%s): %s",
+            logger.error("Config build failed for scenario %d (%s): %s",
                          idx + 1, attack_name, exc, exc_info=True)
             return 1
 
@@ -591,8 +624,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         "".join(f"\n  [{i+1}] {lbl}" for i, (_, _, lbl, _) in enumerate(scenarios)),
     )
 
+    from src.analysis.deanonymization import evaluate_attack
+    from src.analysis.metrics import compute_threshold_sweep
+
     results: Dict[str, Any] = {}
-    labels:  Dict[str, str] = {}
+    labels: Dict[str, str] = {}
+    sweeps: Dict[str, Any] = {}
+    deanon_map: Dict[str, List[Any]] = {}
+    per_seed_map: Dict[str, List[Dict[str, Any]]] = {}
+
     t0 = time.perf_counter()
 
     for key, cfg, label, attack_name in scenarios:
@@ -602,7 +642,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.info("=" * 60)
 
         sim_dirs = _resolve_sim_dirs(global_args, cfg.num_seeds, output_dir)
-
         attack = entry.attack_cls(
             cfg,
             workspace=output_dir / "workspace",
@@ -612,10 +651,33 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         try:
             result = attack.run(sim_dirs, label=label)
-            results[key] = result
-            labels[key]  = label
         except Exception as exc:
             logger.error("Scenario '%s' failed: %s", label, exc, exc_info=True)
+            continue
+
+        total_observed = result.extra_info.get("total_guard_profiles_observed")
+        result.metrics = evaluate_attack(
+            result.deanon_results,
+            total_observed=total_observed,
+        )
+        per_seed_id_metrics: List[Dict[str, Any]] = []
+        for seed_total, seed_results_group in _group_by_seed(
+            result.deanon_results
+        ):
+            per_seed_id_metrics.append(
+                evaluate_attack(seed_results_group, total_observed=seed_total)
+            )
+
+        results[key]      = result
+        labels[key]       = label
+        deanon_map[key]   = result.deanon_results
+        per_seed_map[key] = per_seed_id_metrics
+
+        sweeps[key] = compute_threshold_sweep(
+            result.deanon_results,
+            total_observed=total_observed,
+            n_thresholds=global_args.sweep_thresholds,
+        )
 
     elapsed = time.perf_counter() - t0
     logger.info("─" * 60)
@@ -628,15 +690,34 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.warning("No scenarios produced results.")
         return 1
 
-    if not global_args.no_report:
-        _render_report(results, labels, output_dir)
-        logger.info("Output written to: %s", output_dir)
-
+    _render_report(
+        results, labels, sweeps, deanon_map, per_seed_map, output_dir, plot_set
+    )
+    logger.info("Output written to: %s", output_dir)
     return 0
 
 
+def _group_by_seed(
+    all_results: List[Any]
+) -> List[Tuple[Optional[int], List[Any]]]:
+    """Best-effort split of aggregated results back into per-seed groups.
+
+    Uses the ``client_id`` prefix ``"client_seed{N}_"`` inserted by
+    ``GuardExitAttack``.  Returns a list of ``(total_observed, results_for_seed)``
+    pairs; ``total_observed`` is ``None`` when it cannot be inferred.
+    """
+    import re
+    groups: Dict[int, List[Any]] = {}
+    for r in all_results:
+        m = re.match(r"(?:client_seed|synthetic_seed)(\d+)_", r.client_id)
+        if m:
+            groups.setdefault(int(m.group(1)), []).append(r)
+        else:
+            groups.setdefault(0, []).append(r)
+    return [(None, v) for v in groups.values()]
+
+
 def _register_attacks() -> None:
-    """Populate ATTACK_REGISTRY.  Called once at module load."""
     try:
         from src.attacks.guard_exit_correlation import GuardExitAttack
         ATTACK_REGISTRY["guard-exit"] = AttackEntry(

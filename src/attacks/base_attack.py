@@ -14,7 +14,6 @@ import numpy as np
 
 from src.analysis.correlation import CorrelationAnalyzer, TrafficProfile, CorrelationConfig
 from src.analysis.deanonymization import DeanonymizationResult, evaluate_attack
-from src.analysis.metrics import compute_roc_metrics
 
 @dataclass
 class AttackConfig:
@@ -258,11 +257,6 @@ class BaseAttack(abc.ABC):
                     )
 
         metrics = evaluate_attack(all_results) if all_results else {}
-
-        y_true = np.array([1 if r.successful else 0 for r in all_results])
-        y_scores = np.array([r.correlation_score for r in all_results])
-        if len(np.unique(y_true)) > 1:
-            metrics.update(compute_roc_metrics(y_true, y_scores))
 
         elapsed = time.perf_counter() - t0
 

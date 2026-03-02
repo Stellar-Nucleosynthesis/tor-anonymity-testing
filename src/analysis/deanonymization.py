@@ -1,14 +1,36 @@
-from typing import Optional, List, Dict
 from dataclasses import dataclass
-import numpy as np
-from scipy.stats import wilcoxon, mannwhitneyu
+from typing import Any, Dict, List, Optional
 
-from src.analysis.metrics import compute_basic_metrics, compute_roc_metrics
+from src.analysis.metrics import (
+    compare_scenarios,
+    compute_identification_metrics,
+    compute_seed_variance,
+    compute_timing_metrics,
+    statistical_significance,
+)
 
 
 @dataclass
 class DeanonymizationResult:
-    """Single deanonymization attempt result"""
+    """One top-1 identification attempt for a single guard-side circuit.
+
+    Attributes:
+        client_id: Unique identifier for the relay.
+        circuit_id: Scoped ``"hostname/local_cid"`` string from the guard log.
+        true_guard: Hostname of the actual guard relay used by this circuit.
+        true_exit: Hostname of the actual exit relay used by this circuit.
+        predicted_guard: Guard hostname the attack attributed this circuit to,
+            or ``None`` when the adversary does not control the guard.
+        predicted_exit: Exit hostname ranked first by the attack, or ``None``
+            when no candidate cleared the threshold.
+        confidence: Normalised confidence in the top-1 prediction (0–1).
+        correlation_score: Raw primary correlation score for the top-ranked
+            candidate (e.g. cross-correlation coefficient).
+        time_to_identify: Wall-clock seconds spent on this circuit.
+        successful: ``True`` when the top-ranked candidate is the correct
+            exit and the score clears the decision threshold.
+    """
+
     client_id: str
     circuit_id: str
     true_guard: str
@@ -21,138 +43,32 @@ class DeanonymizationResult:
     successful: bool
 
 
-def compute_time_to_deanonymize(results: List[DeanonymizationResult]) -> Dict[str, float]:
-    """
-    Compute statistics about time to deanonymize.
-
-    Args:
-        results: List of deanonymization results
-
-    Returns:
-        Dictionary with timing statistics
-    """
-    successful_times = [r.time_to_identify for r in results if r.successful]
-
-    if not successful_times:
-        return {
-            'mean_time': float('inf'),
-            'median_time': float('inf'),
-            'min_time': float('inf'),
-            'max_time': float('inf'),
-            'std_time': 0
-        }
-
-    return {
-        'mean_time': np.mean(successful_times),
-        'median_time': np.median(successful_times),
-        'min_time': np.min(successful_times),
-        'max_time': np.max(successful_times),
-        'std_time': np.std(successful_times),
-        'total_successful': len(successful_times),
-        'success_rate': len(successful_times) / len(results)
-    }
-
-
 def evaluate_attack(
-        results: List[DeanonymizationResult]
-) -> Dict[str, any]:
-    """
-    Comprehensive evaluation of an attack.
+    results: List[DeanonymizationResult],
+    total_observed: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Compute identification and timing metrics for one attack run.
 
     Args:
-        results: List of deanonymization results
+        results: Deanonymization results for one seed or aggregated across
+            seeds.
+        total_observed: Total guard profiles the attack received before
+            candidate pre-filtering.  When ``None``, ``len(results)`` is used
+            as the denominator so ``coverage = 1.0``.
 
     Returns:
-        Dictionary with all metrics
+        Merged dict from ``compute_identification_metrics`` and
+        ``compute_timing_metrics``.  All keys are documented in
+        ``src/analysis/metrics.py``.
     """
-    y_true = np.array([int(r.successful == r.decision) for r in results])
-    y_scores = np.array([r.correlation_score for r in results])
-    y_pred = np.array([1 if r.decision else 0 for r in results])
-
-    metrics = {}
-
-    metrics.update(compute_basic_metrics(y_true, y_pred))
-
-    if len(np.unique(y_true)) > 1:
-        metrics.update(compute_roc_metrics(y_true, y_scores))
-
-    metrics.update(compute_time_to_deanonymize(results))
-
-    confidences = [r.confidence for r in results]
-    metrics['mean_confidence'] = np.mean(confidences)
-    metrics['median_confidence'] = np.median(confidences)
-
+    metrics = compute_identification_metrics(results, total_observed=total_observed)
+    metrics.update(compute_timing_metrics(results))
     return metrics
 
-
-def compare_scenarios(scenario_results: Dict[str, Dict[str, any]]) -> Dict[str, any]:
-    """
-    Compare multiple attack scenarios.
-
-    Args:
-        scenario_results: Dictionary mapping scenario names to their metrics
-
-    Returns:
-        Comparison analysis
-    """
-    comparison = {
-        'scenarios': list(scenario_results.keys()),
-        'metrics_comparison': {}
-    }
-
-    key_metrics = ['roc_auc', 'f1_score', 'precision', 'recall',
-                   'success_rate', 'mean_time']
-
-    for metric in key_metrics:
-        values = {}
-        for scenario, results in scenario_results.items():
-            if metric in results:
-                values[scenario] = results[metric]
-
-        if values:
-            comparison['metrics_comparison'][metric] = {
-                'values': values,
-                'best_scenario': max(values, key=values.get) if metric != 'mean_time'
-                else min(values, key=values.get),
-                'mean': np.mean(list(values.values())),
-                'std': np.std(list(values.values()))
-            }
-
-    return comparison
-
-
-def statistical_significance(
-        results1: List[DeanonymizationResult],
-        results2: List[DeanonymizationResult],
-        test: str = 'wilcoxon'
-) -> Dict[str, float]:
-    """
-    Test statistical significance between two attack scenarios.
-
-    Args:
-        results1: Results from first scenario
-        results2: Results from second scenario
-        test: Statistical test to use ('wilcoxon' or 'mann_whitney')
-
-    Returns:
-        Dictionary with test statistics
-    """
-    scores1 = np.array([r.correlation_score for r in results1])
-    scores2 = np.array([r.correlation_score for r in results2])
-
-    if test == 'mann_whitney':
-        statistic, p_value = mannwhitneyu(scores1, scores2)
-    elif test == 'wilcoxon':
-        if len(scores1) != len(scores2):
-            raise ValueError("Wilcoxon requires equal sample sizes")
-        else:
-            statistic, p_value = wilcoxon(scores1, scores2)
-    else:
-        raise ValueError("Test must be 'wilcoxon' or 'mann_whitney'")
-
-    return {
-        'test': test,
-        'statistic': statistic,
-        'p_value': p_value,
-        'significant': p_value < 0.05
-    }
+__all__ = [
+    "DeanonymizationResult",
+    "evaluate_attack",
+    "compare_scenarios",
+    "compute_seed_variance",
+    "statistical_significance",
+]
