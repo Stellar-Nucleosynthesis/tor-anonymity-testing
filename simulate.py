@@ -1,33 +1,80 @@
 """Step 2 — Run Shadow/tornettools network simulations.
 
 Runs the tornettools pipeline for each seed:
-  stage (once, shared) → generate → simulate → parse
 
-Stage processes relay descriptors and produces files that are identical
-for a given month, so it runs once into ./_stage/ and the output is
-reused across all seeds.  Generate, simulate, and parse run independently
-per seed and land in seed_0/, seed_1/, … under --output-dir.
+    stage (once, shared) → generate → [inject custom clients] → simulate → parse
 
-All seeds share the same network scale and simulation time.
+The stage step processes relay descriptors and produces deterministic output
+for a given month.  It runs once into ``_stage/`` and is reused across all
+seeds.  Generate, simulate, and parse run independently per seed.
+
+Custom clients
+--------------
+The optional ``--client-groups FILE`` argument accepts a JSON file that
+describes one or more *groups* of custom client hosts.  For each group a
+fraction of the tornettools-generated ``torclient`` hosts is replaced with
+hosts that run user-defined processes (a modified Tor binary, a probe tool,
+a traffic generator, etc.) before Shadow starts.
+
+A *client group manifest* is written next to ``shadow.yaml`` in every seed
+directory.  The manifest records which Shadow hostnames belong to which group
+so that the analysis step can filter to a specific group's circuits.
+
+Client groups JSON format
+-------------------------
+The file must contain a JSON array.  Each element describes one group::
+
+    [
+      {
+        "name":     "probe",
+        "fraction": 0.05,
+        "tor_binary": "/path/to/modified-tor",
+        "torrc_append": {
+          "CircuitBuildTimeout": "10",
+          "NewCircuitPeriod": "15"
+        },
+        "replace_default_traffic": true,
+        "processes": [
+          {
+            "path":       "/path/to/probe-tool",
+            "args":       "--socks {socks_port} --log {data_dir}/probe.log",
+            "start_time": "90s"
+          }
+        ]
+      },
+      {
+        "name":     "baseline",
+        "fraction": 0.05,
+        "processes": []
+      }
+    ]
+
+Placeholders available in ``args``:
+    {hostname}      — Shadow host name, e.g. "torclient3"
+    {socks_port}    — Tor SOCKS port for this host
+    {control_port}  — Tor ControlPort for this host
+    {data_dir}      — Absolute path to the host's template data directory
+    {torrc_dir}     — Alias for {data_dir}
 
 Usage
 -----
-  # Single seed, 1%% scale, 600 s simulation
+
+  # Single seed, 1% scale, 600 s simulation
   python simulate.py --data-dir ./data --output-dir ./runs
 
-  # Three seeds at 0.1%% scale, 1800 s each, with tornettools plots
+  # Three seeds with two custom client groups
   python simulate.py \\
       --data-dir ./data --output-dir ./runs \\
-      --num-seeds 3 --network-scale 0.001 --sim-time 1800 --plot
+      --num-seeds 3 --network-scale 0.01 --sim-time 1800 \\
+      --client-groups ./my_groups.json
 
-  # Run only specific seeds (non-contiguous)
+  # Specific seeds only
   python simulate.py \\
       --data-dir ./data --output-dir ./runs \\
-      --seeds 0 2 5
+      --seeds 0 2 5 --client-groups ./my_groups.json
 
-  # Data from a different month
-  python simulate.py \\
-      --data-dir ./data --month 2024-01 --output-dir ./runs
+  # Different month
+  python simulate.py --data-dir ./data --month 2024-01 --output-dir ./runs
 """
 
 import argparse
@@ -36,7 +83,10 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from src.simulation.orchestrator import SimulationOrchestrator
+from src.simulation.orchestrator import (
+    CustomClientGroup,
+    SimulationOrchestrator,
+)
 
 def _configure_logging(level: str) -> None:
     logging.basicConfig(
@@ -61,6 +111,12 @@ def _positive_float(value: str) -> float:
     return f
 
 
+def _file_must_exist(value: str) -> Path:
+    p = Path(value)
+    if not p.is_file():
+        raise argparse.ArgumentTypeError(f"file not found: {value!r}")
+    return p
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="simulate.py",
@@ -80,10 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--month", "-m",
         metavar="YYYY-MM",
         default="2023-04",
-        help=(
-            "Month tag used to locate consensus/descriptor subdirectories "
-            "under --data-dir (default: 2023-04)."
-        ),
+        help="Month of relay data to use (default: 2023-04).",
     )
 
     grp_sim = p.add_argument_group("simulation parameters")
@@ -93,7 +146,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("runs"),
         help=(
-            "Parent output directory.  Subdirectories seed_0/, seed_1/, … "
+            "Parent output directory. Subdirectories seed_0/, seed_1/, ... "
             "are created for each seed (default: ./runs)."
         ),
     )
@@ -102,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         type=int,
         default=1,
-        help="Number of seeds to run as 0, 1, … N-1 (default: 1).",
+        help="Number of seeds to run as 0, 1, ... N-1 (default: 1).",
     )
     grp_sim.add_argument(
         "--seeds",
@@ -110,20 +163,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         type=int,
         default=None,
-        help=(
-            "Explicit seed integers, e.g. --seeds 0 2 7. "
-            "Overrides --num-seeds when provided."
-        ),
+        help="Explicit seed integers (e.g. --seeds 0 2 7). Overrides --num-seeds.",
     )
     grp_sim.add_argument(
         "--network-scale",
         metavar="SCALE",
         type=_positive_float,
         default=0.01,
-        help=(
-            "Fraction of the public Tor network to simulate "
-            "(e.g. 0.01 = 1%%, default: 0.01)."
-        ),
+        help="Fraction of the public Tor network to simulate (default: 0.01 = 1%%).",
     )
     grp_sim.add_argument(
         "--sim-time",
@@ -131,6 +178,31 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=600,
         help="Shadow simulation stop-time in seconds (default: 600).",
+    )
+
+    grp_inject = p.add_argument_group(
+        "custom client injection",
+        description=(
+            "Replace a fraction of generated torclient hosts with user-defined "
+            "hosts before Shadow runs. See module docstring for the JSON format."
+        ),
+    )
+    grp_inject.add_argument(
+        "--client-groups",
+        metavar="FILE", type=_file_must_exist, default=None,
+        help=(
+            "JSON file describing one or more custom client groups to inject. "
+            "A custom_clients_manifest.json is written per seed for use by "
+            "analyze.py --client-filter."
+        ),
+    )
+    grp_inject.add_argument(
+        "--injection-seed",
+        metavar="N", type=int, default=42,
+        help=(
+            "RNG seed for reproducible host selection during injection "
+            "(default: 42). Each simulation seed uses injection_seed + seed_idx."
+        ),
     )
 
     grp_tools = p.add_argument_group("tool paths")
@@ -227,6 +299,34 @@ def main(argv: Optional[List[str]] = None) -> int:
         if candidate.exists():
             tor_gencert = candidate
 
+    client_groups: List[CustomClientGroup] = []
+    if args.client_groups:
+        try:
+            client_groups = SimulationOrchestrator.load_client_groups(
+                args.client_groups
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to load client groups from %s: %s",
+                args.client_groups, exc,
+            )
+            return 1
+
+        total_frac = sum(g.fraction for g in client_groups)
+        logger.info(
+            "Loaded %d client group(s) from %s  (total fraction: %.1f%%):  %s",
+            len(client_groups),
+            args.client_groups,
+            total_frac * 100,
+            ", ".join(f"{g.name}={g.fraction*100:.1f}%" for g in client_groups),
+        )
+        if total_frac > 1.0:
+            logger.error(
+                "Total client-group fraction (%.2f) exceeds 1.0 — aborting.",
+                total_frac,
+            )
+            return 1
+
     seed_list: List[int] = (
         args.seeds if args.seeds is not None
         else list(range(args.num_seeds))
@@ -246,7 +346,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     logger.info("─" * 60)
-    logger.info("Stage step (shared across all seeds)…")
+    logger.info("Stage step (shared across all seeds)...")
     logger.info("─" * 60)
     try:
         staged = orc_stage.stage_network_data(
@@ -288,7 +388,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         try:
-            logger.info("[seed %d] generate…", seed_idx)
+            logger.info("[seed %d] generate...", seed_idx)
             network_dir = orc.generate_network(
                 relayinfo_file=staged["relayinfo"],
                 userinfo_file=staged["userinfo"],
@@ -299,21 +399,38 @@ def main(argv: Optional[List[str]] = None) -> int:
                 output_dir=seed_dir,
             )
 
-            logger.info("[seed %d] simulate (%ds)…", seed_idx, args.sim_time)
+            if client_groups:
+                logger.info(
+                    "[seed %d] injecting %d client group(s)...",
+                    seed_idx, len(client_groups),
+                )
+                manifest = orc.inject_custom_clients(
+                    network_dir=network_dir,
+                    groups=client_groups,
+                    rng_seed=args.injection_seed + seed_idx,
+                )
+                for gname, hosts in manifest.groups.items():
+                    display = hosts if len(hosts) <= 5 else hosts[:5] + ["..."]
+                    logger.info(
+                        "[seed %d]   group '%s': %d host(s) — %s",
+                        seed_idx, gname, len(hosts), display,
+                    )
+
+            logger.info("[seed %d] simulate (%ds)...", seed_idx, args.sim_time)
             orc.run_simulation(
                 network_dir,
                 additional_args=["--args", f"--stop-time {args.sim_time}"],
             )
 
-            logger.info("[seed %d] parse…", seed_idx)
+            logger.info("[seed %d] parse...", seed_idx)
             orc.parse_results(network_dir)
 
             if args.plot:
-                logger.info("[seed %d] plot…", seed_idx)
+                logger.info("[seed %d] plot...", seed_idx)
                 orc.plot_results(network_dir)
 
             if args.archive:
-                logger.info("[seed %d] archive…", seed_idx)
+                logger.info("[seed %d] archive...", seed_idx)
                 orc.archive_results(network_dir)
 
             logger.info("[seed %d] ✓ complete: %s", seed_idx, seed_dir)
@@ -330,10 +447,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     if succeeded:
         dirs_arg = " ".join(str(output_dir / f"seed_{s}") for s in succeeded)
-        logger.info(
-            "Next step:\n  python analyze.py --sim-dirs %s --output-dir ./results",
-            dirs_arg,
-        )
+        lines = [
+            f"python analyze.py --sim-dirs {dirs_arg} --output-dir ./results \\"
+        ]
+        if client_groups:
+            lines.append(
+                "    guard-exit  "
+                + "  ".join(f"# --client-filter group:{g.name}" for g in client_groups)
+            )
+        else:
+            lines.append("    guard-exit")
+        logger.info("Next step:\n  %s", "\n  ".join(lines))
+
     if failed:
         logger.warning("Failed seeds: %s", failed)
         return 1

@@ -1,39 +1,186 @@
-"""
-Simulation Orchestrator
-
-Manages the execution of Shadow simulations using the official tornettools workflow:
-1. Stage: Process relay and user data
-2. Generate: Create Shadow network configuration
-3. Simulate: Run Shadow with TGen and OnionTrace
-4. Parse: Process simulation results
-5. Plot: Generate visualizations (optional)
-6. Archive: Package results (optional)
-"""
-
-import subprocess
-import os
-from pathlib import Path
-from typing import Dict, List, Any, Optional
+import json
 import logging
+import os
+import re
+import subprocess
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-def setup_logging(log_level: str = "INFO"):
-    """Setup logging"""
+import numpy as np
+import yaml
+
+
+def setup_logging(log_level: str = "INFO") -> None:
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
-        format='%(asctime)s - %(levelname)s - %(message)s'
+        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
     )
 
-class SimulationOrchestrator:
-    """
-    Orchestrates Shadow simulation execution following official tornettools workflow.
 
-    Workflow:
-        1. tornettools stage - Process Tor network data
-        2. tornettools generate - Create Shadow config
-        3. tornettools simulate - Run Shadow simulation
-        4. tornettools parse - Parse results
-        5. tornettools plot - Generate graphs (optional)
+@dataclass
+class ClientProcess:
+    """One process entry to be added to a Shadow host.
+
+    Args:
+        path: Absolute path to the executable.
+        args: Argument string. The following placeholders are substituted
+            per-host at injection time:
+              ``{hostname}``      — Shadow host name, e.g. ``"torclient3"``.
+              ``{socks_port}``    — SOCKS port parsed from the host's tor args.
+              ``{control_port}``  — ControlPort parsed from the host's tor args.
+              ``{data_dir}``      — Absolute path to the host's data directory
+                                    inside ``shadow.data.template/``.
+              ``{torrc_dir}``     — Same as ``{data_dir}`` (convenience alias).
+        start_time: Shadow virtual start time, e.g. ``"300s"`` or ``300``.
+        environment: Extra environment variables for this process.
+    """
+    path: str
+    args: str = ""
+    start_time: Any = "300"
+    environment: Dict[str, str] = field(default_factory=dict)
+
+    def to_shadow_entry(self, substitutions: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a Shadow YAML process dict with placeholders filled in."""
+        entry: Dict[str, Any] = {
+            "path": self.path,
+            "args": self.args.format(**substitutions),
+            "start_time": self.start_time,
+        }
+        if self.environment:
+            entry["environment"] = dict(self.environment)
+        return entry
+
+
+@dataclass
+class CustomClientGroup:
+    """Configuration for one group of custom Shadow client hosts.
+
+    A group replaces a ``fraction`` of the tornettools-generated ``torclient``
+    hosts with hosts that run ``processes`` instead of (or in addition to) the
+    default tgen traffic generator.
+
+    Args:
+        name: Short identifier used in the manifest and as a filter key during
+            analysis (e.g. ``"probe"``, ``"modified-tor"``).
+        fraction: Fraction of all torclient hosts to replace (0, 1].
+        processes: Replacement process list. Tor and OnionTrace from the
+            original host are preserved; these entries replace tgen/tgenrs.
+        tor_binary: If set, the host's tor process path is replaced with this
+            binary.
+        torrc_append: Key-value pairs appended to the host's torrc as
+            ``Key Value`` lines. Applied after the tornettools-generated torrc
+            so they override any earlier setting.
+        replace_default_traffic: When ``True`` (default) the tgen/tgenrs
+            process is removed and replaced by ``processes``. When ``False``
+            ``processes`` are appended alongside the existing traffic generator.
+        count: Exact number of hosts to replace. Takes precedence over
+            ``fraction`` when set. Useful when the total number of clients is
+            small and rounding produces unexpected results.
+    """
+    name: str
+    fraction: float
+    processes: List[ClientProcess] = field(default_factory=list)
+    tor_binary: Optional[str] = None
+    torrc_append: Dict[str, str] = field(default_factory=dict)
+    replace_default_traffic: bool = True
+    count: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if not 0 < self.fraction <= 1:
+            raise ValueError(
+                f"CustomClientGroup '{self.name}': fraction must be in (0, 1], "
+                f"got {self.fraction}"
+            )
+        if not self.name.isidentifier():
+            raise ValueError(
+                f"Group name '{self.name}' is not a valid identifier. "
+                "Use letters, digits, and underscores only."
+            )
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "CustomClientGroup":
+        """Construct a ``CustomClientGroup`` from a plain dictionary.
+
+        The ``processes`` key should be a list of dicts with ``path``, ``args``,
+        ``start_time``, and optionally ``environment``.
+        """
+        processes = [
+            ClientProcess(**p) for p in d.pop("processes", [])
+        ]
+        return cls(processes=processes, **d)
+
+    def compute_count(self, total_clients: int) -> int:
+        """Return the number of hosts this group should replace."""
+        if self.count is not None:
+            return min(self.count, total_clients)
+        return max(1, round(self.fraction * total_clients))
+
+
+MANIFEST_FILENAME = "custom_clients_manifest.json"
+
+@dataclass
+class CustomClientsManifest:
+    """Maps group names to the Shadow hostnames they control.
+
+    Written to ``<network_dir>/custom_clients_manifest.json`` after injection.
+    ``analyze.py`` loads this file to resolve ``--client-filter group:<name>``
+    arguments into concrete hostname sets.
+
+    Attributes:
+        groups: ``{group_name: [hostname, ...]}``.
+        injection_time: ISO timestamp of when the manifest was written.
+        total_clients: Total number of torclient hosts in the simulation.
+    """
+    groups: Dict[str, List[str]]
+    injection_time: str
+    total_clients: int
+
+    def save(
+            self, network_dir: Path) -> Path:
+        path = network_dir / MANIFEST_FILENAME
+        path.write_text(json.dumps(self.__dict__, indent=2))
+        return path
+
+    @classmethod
+    def load(cls, network_dir: Path) -> Optional["CustomClientsManifest"]:
+        path = network_dir / MANIFEST_FILENAME
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        return cls(**data)
+
+    def resolve_filter(self, filter_spec: str) -> Optional[List[str]]:
+        """Resolve a filter spec to a list of hostnames.
+
+        Supported formats:
+          ``group:probe``                    — all hosts in the named group.
+          ``host:torclient3,torclient7``     — explicit comma-separated hostnames.
+
+        Returns ``None`` when the spec format is unrecognized.
+        """
+        if filter_spec.startswith("group:"):
+            name = filter_spec[len("group:"):]
+            return self.groups.get(name)
+        if filter_spec.startswith("host:"):
+            return [h.strip() for h in filter_spec[len("host:"):].split(",")]
+        return None
+
+
+class SimulationOrchestrator:
+    """Orchestrates the Shadow simulation pipeline.
+
+    Workflow::
+
+        stage_network_data()
+        generate_network()
+        inject_custom_clients()   ← optional
+        run_simulation()
+        parse_results()
+        plot_results()            ← optional
+        archive_results()         ← optional
     """
 
     def __init__(
@@ -41,7 +188,8 @@ class SimulationOrchestrator:
             workspace: Path = Path("./workspace"),
             tornettools_cmd: str = "tornettools",
             tor_binary: Optional[str] = None,
-            tor_gencert_binary: Optional[str] = None):
+            tor_gencert_binary: Optional[str] = None
+    ):
         """
         Initialize orchestrator.
 
@@ -56,9 +204,7 @@ class SimulationOrchestrator:
         self.tornettools_cmd = tornettools_cmd
         self.tor_binary = tor_binary
         self.tor_gencert_binary = tor_gencert_binary
-
-        setup_logging("INFO")
-        self.logger = logging.getLogger('SimulationOrchestrator')
+        self.logger = logging.getLogger("SimulationOrchestrator")
 
     def stage_network_data(
             self,
@@ -69,7 +215,7 @@ class SimulationOrchestrator:
             tmodel_dir: Path,
             onionperf_data: Optional[Path] = None,
             bandwidth_data: Optional[Path] = None,
-            geoip_path: Optional[Path] = None,
+            geoip_path: Optional[Path] = None
     ) -> Dict[str, Path]:
         """
         Run tornettools stage to process Tor network data.
@@ -101,7 +247,6 @@ class SimulationOrchestrator:
             str(tmodel_dir),
             '--prefix', str(output_dir),
         ]
-
         if onionperf_data:
             cmd.extend(['--onionperf_data_path', str(onionperf_data)])
 
@@ -111,45 +256,20 @@ class SimulationOrchestrator:
         if geoip_path:
             cmd.extend(['--geoip_path', str(geoip_path)])
 
-        try:
-            self.logger.info(f"Executing: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=1800
-            )
+        self._run_cmd(cmd, timeout=1800, step="stage")
 
-            self.logger.info("tornettools stage completed successfully")
-            if result.stdout:
-                self.logger.debug(f"Output: {result.stdout}")
+        staged: Dict[str, Optional[Path]] = dict()
+        for f in output_dir.glob("relayinfo_*.json"):
+            staged["relayinfo"] = f
+        for f in output_dir.glob("userinfo_*.json"):
+            staged["userinfo"] = f
+        for f in output_dir.glob("networkinfo_*.gml"):
+            staged["networkinfo"] = f
+        for f in output_dir.glob("tor_metrics_*.json"):
+            staged["tor_metrics"] = f
 
-            staged_files : Dict[str, Path | None] = {
-                'relayinfo': None,
-                'userinfo': None,
-                'networkinfo': None,
-                'tor_metrics': None
-            }
-
-            for file in output_dir.glob('relayinfo_*.json'):
-                staged_files['relayinfo'] = file
-            for file in output_dir.glob('userinfo_*.json'):
-                staged_files['userinfo'] = file
-            for file in output_dir.glob('networkinfo_*.gml'):
-                staged_files['networkinfo'] = file
-            for file in output_dir.glob('tor_metrics_*.json'):
-                staged_files['tor_metrics'] = file
-
-            self.logger.info(f"Staged files: {staged_files}")
-            return staged_files
-
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"tornettools stage failed: {e.stderr}")
-            raise
-        except subprocess.TimeoutExpired:
-            self.logger.error("tornettools stage timed out")
-            raise
+        self.logger.info("Staged files: %s", {k: str(v) for k, v in staged.items()})
+        return staged
 
     def generate_network(
             self,
@@ -178,7 +298,7 @@ class SimulationOrchestrator:
         Returns:
             Path to generated network directory
         """
-        self.logger.info(f"Running tornettools generate (scale={network_scale})...")
+        self.logger.info(f"Running tornettools generate (scale={network_scale:.2%})...")
 
         if output_dir is None:
             output_dir = self.workspace
@@ -192,6 +312,8 @@ class SimulationOrchestrator:
         else:
             self.logger.warning("Tor binaries not specified - assuming they're in PATH")
 
+        network_dir = output_dir / prefix
+
         cmd = [
             self.tornettools_cmd,
             'generate',
@@ -200,45 +322,135 @@ class SimulationOrchestrator:
             str(networkinfo_file),
             str(tmodel_dir),
             '--network_scale', str(network_scale),
-            '--prefix', str(output_dir / prefix),
+            '--prefix', str(network_dir),
             '--events', "CIRC,CIRC_BW"
         ]
-
         if additional_args:
             cmd.extend(additional_args)
 
-        try:
-            self.logger.info(f"Executing: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=3600
-            )
+        self._run_cmd(cmd, timeout=3600, step="generate", env=env)
 
-            self.logger.info("tornettools generate completed successfully")
-            if result.stdout:
-                self.logger.debug(f"Output: {result.stdout}")
-
-            network_dir = output_dir / f"{prefix}-{network_scale}"
-
-            if not network_dir.exists():
-                network_dir = output_dir / prefix
-
-            if not network_dir.exists():
-                raise FileNotFoundError(f"Generated network directory not found at {network_dir}")
-
-            self.logger.info(f"Generated network at: {network_dir}")
+        if network_dir.exists():
+            self.logger.info("Generated network: %s", network_dir)
             return network_dir
 
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"tornettools generate failed: {e.stderr}")
-            raise
-        except subprocess.TimeoutExpired:
-            self.logger.error("tornettools generate timed out")
-            raise
+        raise FileNotFoundError(
+            f"Generated network directory not found under {output_dir}."
+        )
+
+
+    def inject_custom_clients(
+            self,
+            network_dir: Path,
+            groups: List[CustomClientGroup],
+            rng_seed: int = 42
+    ) -> CustomClientsManifest:
+        """Patch ``shadow.yaml`` to replace a fraction of client hosts.
+
+        For each group the method:
+
+        1. Identifies all ``torclient*`` hosts generated by tornettools.
+        2. Randomly selects ``group.compute_count(n_clients)`` of them.
+        3. Replaces their tgen/tgenrs process with ``group.processes``.
+        4. Optionally replaces the tor binary path.
+        5. Optionally appends lines to the host's torrc.
+        6. Writes a ``custom_clients_manifest.json`` next to ``shadow.yaml``.
+
+        Args:
+            network_dir: The directory produced by ``generate_network`` that
+                contains ``shadow.yaml``.
+            groups: List of ``CustomClientGroup`` objects. Groups must
+                have unique names. Total replaced hosts must not exceed the
+                number of client hosts in the simulation.
+            rng_seed: Seed for reproducible host selection.
+
+        Returns:
+            The written ``CustomClientsManifest``.
+
+        Raises:
+            FileNotFoundError: When ``shadow.yaml`` is not found.
+            ValueError: When group names are not unique or the total count
+                exceeds the number of available client hosts.
+        """
+        shadow_yaml = self._find_shadow_yaml(network_dir)
+        self.logger.info("Injecting custom clients into %s", shadow_yaml)
+
+        with shadow_yaml.open() as fh:
+            cfg = yaml.safe_load(fh)
+
+        hosts: Dict[str, Any] = cfg.get("hosts", {})
+        client_hosts = [h for h, v in hosts.items() if self._is_client_host(h, v)]
+        n_clients = len(client_hosts)
+        self.logger.info("Found %d client host(s) in shadow.yaml.", n_clients)
+
+        if n_clients == 0:
+            raise ValueError(
+                "No client hosts found in shadow.yaml. "
+                "Expected hosts whose name matches 'torclient*' or that "
+                "contain a tgen/tgenrs process."
+            )
+
+        names = [g.name for g in groups]
+        if len(names) != len(set(names)):
+            raise ValueError(f"Duplicate group names: {names}")
+
+        total_replacing = sum(g.compute_count(n_clients) for g in groups)
+        if total_replacing > n_clients:
+            raise ValueError(
+                f"Groups request {total_replacing} host replacements but only "
+                f"{n_clients} client hosts are available."
+            )
+
+        rng = np.random.default_rng(seed=rng_seed)
+        available = list(client_hosts)
+        rng.shuffle(available)
+
+        manifest_groups: Dict[str, List[str]] = {}
+
+        for group in groups:
+            n = group.compute_count(n_clients)
+            sel = available[:n]
+            available = available[n:]
+
+            self.logger.info(
+                "Group '%s': replacing %d host(s): %s",
+                group.name, len(sel), sel,
+            )
+
+            for hostname in sel:
+                host_entry = hosts[hostname]
+                data_dir = self._host_data_dir(network_dir, hostname)
+                ports = self._parse_tor_ports(host_entry)
+                substitutions = {
+                    "hostname": hostname,
+                    "socks_port": ports["socks_port"] or 9000,
+                    "control_port": ports["control_port"] or 9001,
+                    "data_dir": str(data_dir),
+                    "torrc_dir": str(data_dir),
+                }
+
+                self._apply_group_to_host(
+                    host_entry, group, substitutions, data_dir
+                )
+
+            manifest_groups[group.name] = sel
+
+        cfg["hosts"] = hosts
+        with shadow_yaml.open("w") as fh:
+            yaml.dump(cfg, fh, default_flow_style=False, sort_keys=False)
+
+        manifest = CustomClientsManifest(
+            groups=manifest_groups,
+            injection_time=datetime.now().isoformat(),
+            total_clients=n_clients,
+        )
+        manifest_path = manifest.save(network_dir)
+        self.logger.info(
+            "Manifest written to %s (groups: %s)",
+            manifest_path,
+            {k: len(v) for k, v in manifest_groups.items()},
+        )
+        return manifest
 
     def run_simulation(
             self,
@@ -255,39 +467,19 @@ class SimulationOrchestrator:
         Returns:
             Path to simulation output directory (same as network_dir)
         """
-        self.logger.info(f"Running tornettools simulate on {network_dir}...")
+        self.logger.info(f"Running tornettools simulate on {network_dir}")
 
         cmd = [
             self.tornettools_cmd,
             'simulate',
             str(network_dir)
         ]
-
         if additional_args:
             cmd.extend(additional_args)
 
-        try:
-            self.logger.info(f"Executing: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=7200
-            )
+        self._run_cmd(cmd, timeout=7200, step="simulate")
+        return network_dir
 
-            self.logger.info("tornettools simulate completed successfully")
-            if result.stdout:
-                self.logger.debug(f"Output: {result.stdout}")
-
-            return network_dir
-
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"tornettools simulate failed: {e.stderr}")
-            raise
-        except subprocess.TimeoutExpired:
-            self.logger.error("tornettools simulate timed out")
-            raise
 
     def parse_results(
             self,
@@ -314,43 +506,18 @@ class SimulationOrchestrator:
 
         if additional_args:
             cmd.extend(additional_args)
+        self._run_cmd(cmd, timeout=1800, step="parse")
 
-        try:
-            self.logger.info(f"Executing: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=1800
-            )
-
-            self.logger.info("tornettools parse completed successfully")
-            if result.stdout:
-                self.logger.debug(f"Output: {result.stdout}")
-
-            parsed_files = {
-                'parsed_dir': network_dir / 'parsed',
-                'tgen_stats': None,
-                'oniontrace_stats': None
-            }
-
-            if (network_dir / 'parsed').exists():
-                for file in (network_dir / 'parsed').glob('*.json'):
-                    if 'tgen' in file.name:
-                        parsed_files['tgen_stats'] = file
-                    elif 'oniontrace' in file.name:
-                        parsed_files['oniontrace_stats'] = file
-
-            self.logger.info(f"Parsed files: {parsed_files}")
-            return parsed_files
-
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"tornettools parse failed: {e.stderr}")
-            raise
-        except subprocess.TimeoutExpired:
-            self.logger.error("tornettools parse timed out")
-            raise
+        parsed: Dict[str, Any] = {
+            "parsed_dir": network_dir / "parsed"
+        }
+        if (network_dir / "parsed").exists():
+            for f in (network_dir / "parsed").glob("*.json"):
+                if "tgen" in f.name:
+                    parsed["tgen_stats"] = f
+                elif "oniontrace" in f.name:
+                    parsed["oniontrace_stats"] = f
+        return parsed
 
     def plot_results(
             self,
@@ -374,7 +541,6 @@ class SimulationOrchestrator:
         self.logger.info(f"Running tornettools plot on {network_dir}...")
 
         plots_dir = network_dir / prefix
-
         cmd = [
             self.tornettools_cmd,
             'plot',
@@ -388,28 +554,9 @@ class SimulationOrchestrator:
         if additional_args:
             cmd.extend(additional_args)
 
-        try:
-            self.logger.info(f"Executing: {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=600
-            )
+        self._run_cmd(cmd, timeout=600, step="plot")
+        return plots_dir
 
-            self.logger.info("tornettools plot completed successfully")
-            if result.stdout:
-                self.logger.debug(f"Output: {result.stdout}")
-
-            return plots_dir
-
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"tornettools plot failed: {e.stderr}")
-            raise
-        except subprocess.TimeoutExpired:
-            self.logger.error("tornettools plot timed out")
-            raise
 
     def archive_results(
             self,
@@ -437,159 +584,155 @@ class SimulationOrchestrator:
         if additional_args:
             cmd.extend(additional_args)
 
+        self._run_cmd(cmd, timeout=600, step="archive")
+        return network_dir.parent / f"{network_dir.name}.tar.xz"
+
+    @staticmethod
+    def load_client_groups(path: Path) -> List[CustomClientGroup]:
+        """Load a list of ``CustomClientGroup`` objects from a JSON file.
+
+        The file must contain a JSON array. Each element is an object with
+        the fields of ``CustomClientGroup``; the ``processes`` key is a list of
+        objects matching ``ClientProcess``.
+        """
+        raw = json.loads(Path(path).read_text())
+        if not isinstance(raw, list):
+            raise ValueError(f"{path}: expected a JSON array, got {type(raw).__name__}")
+        return [CustomClientGroup.from_dict(entry) for entry in raw]
+
+    def _run_cmd(
+            self,
+            cmd: List[str],
+            timeout: int,
+            step: str,
+            env: Optional[Dict[str, str]] = None
+    ) -> None:
+        self.logger.info("Executing: %s", " ".join(cmd))
         try:
-            self.logger.info(f"Executing: {' '.join(cmd)}")
             result = subprocess.run(
                 cmd,
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=600
+                timeout=timeout,
+                env=env,
             )
-
-            self.logger.info("tornettools archive completed successfully")
             if result.stdout:
-                self.logger.debug(f"Output: {result.stdout}")
-
-            archive_file = network_dir.parent / f"{network_dir.name}.tar.xz"
-            return archive_file
-
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"tornettools archive failed: {e.stderr}")
+                self.logger.debug("%s stdout: %s", step, result.stdout[:2000])
+        except subprocess.CalledProcessError as exc:
+            self.logger.error("%s failed:\n%s", step, exc.stderr)
             raise
         except subprocess.TimeoutExpired:
-            self.logger.error("tornettools archive timed out")
+            self.logger.error("%s timed out after %ds", step, timeout)
             raise
 
-    def run_complete_pipeline(self,
-                             consensus_dir: Path,
-                             server_desc_dir: Path,
-                             userstats_file: Path,
-                             tmodel_dir: Path,
-                             network_scale: float,
-                             seed: int,
-                             prefix: str = "tornet",
-                             onionperf_data: Optional[Path] = None,
-                             bandwidth_data: Optional[Path] = None,
-                             geoip_path: Optional[Path] = None,
-                             tor_metrics_path: Optional[Path] = None,
-                             run_plot: bool = True,
-                             run_archive: bool = False) -> Dict[str, Any]:
-        """
-        Run complete simulation pipeline including staging.
-
-        This method runs the full tornettools workflow:
-        1. Stage - Process raw Tor network data
-        2. Generate - Create Shadow network configuration
-        3. Simulate - Run Shadow simulation
-        4. Parse - Extract statistics
-        5. Plot - Generate graphs (optional)
-        6. Archive - Package results (optional)
-
-        Args:
-            consensus_dir: Directory with consensus files (e.g., consensuses-2023-04/)
-            server_desc_dir: Directory with server descriptors
-            userstats_file: CSV file with user statistics
-            tmodel_dir: TModel directory
-            network_scale: Network scale (e.g., 0.01 for 1%)
-            seed: Random seed
-            prefix: Prefix for network directory
-            onionperf_data: Optional OnionPerf data directory
-            bandwidth_data: Optional bandwidth CSV file
-            geoip_path: Optional path to geoip file
-            tor_metrics_path: Optional Tor metrics for plotting
-            run_plot: Whether to run plot step
-            run_archive: Whether to run archive step
-
-        Returns:
-            Dictionary with all results and paths
-        """
-        self.logger.info(f"Running complete pipeline (scale={network_scale}, seed={seed})")
-        self.logger.info("Pipeline: STAGE → GENERATE → SIMULATE → PARSE → PLOT")
-
-        results : Dict[str, Any] = {
-            'seed': seed,
-            'network_scale': network_scale,
-            'timestamp': datetime.now().isoformat(),
-            'pipeline_steps': []
-        }
-
-        self.logger.info("Step 1/5: Staging network data...")
-        staged_files = self.stage_network_data(
-            output_dir=self.workspace / "staged_data",
-            consensus_dir=consensus_dir,
-            server_desc_dir=server_desc_dir,
-            userstats_file=userstats_file,
-            tmodel_dir=tmodel_dir,
-            onionperf_data=onionperf_data,
-            bandwidth_data=bandwidth_data,
-            geoip_path=geoip_path
+    @staticmethod
+    def _find_shadow_yaml(network_dir: Path) -> Path:
+        for candidate in (
+            network_dir / "shadow.yaml",
+            network_dir / "shadow.config.yaml",
+        ):
+            if candidate.exists():
+                return candidate
+        raise FileNotFoundError(
+            f"shadow.yaml not found under {network_dir}. "
+            "Run generate_network first."
         )
-        results['staged_files'] = {k: str(v) if v else None for k, v in staged_files.items()}
-        results['pipeline_steps'].append('stage')
-        self.logger.info("✓ Staging completed")
 
-        self.logger.info(f"Step 2/5: Generating network (scale={network_scale})...")
-        network_dir = self.generate_network(
-            relayinfo_file=staged_files['relayinfo'],
-            userinfo_file=staged_files['userinfo'],
-            networkinfo_file=staged_files['networkinfo'],
-            tmodel_dir=tmodel_dir,
-            network_scale=network_scale,
-            prefix=prefix
-        )
-        results['network_dir'] = str(network_dir)
-        results['pipeline_steps'].append('generate')
-        self.logger.info("✓ Network generation completed")
-
-        self.logger.info("Step 3/5: Running Shadow simulation...")
-        self.run_simulation(network_dir)
-        results['simulation_completed'] = True
-        results['pipeline_steps'].append('simulate')
-        self.logger.info("✓ Simulation completed")
-
-        self.logger.info("Step 4/5: Parsing results...")
-        parsed_files = self.parse_results(network_dir)
-        results['parsed_files'] = {k: str(v) if v else None for k, v in parsed_files.items()}
-        results['pipeline_steps'].append('parse')
-        self.logger.info("✓ Parsing completed")
-
-        if run_plot:
-            self.logger.info("Step 5/5: Generating plots...")
-            plots_dir = self.plot_results(network_dir, tor_metrics_path=tor_metrics_path)
-            results['plots_dir'] = str(plots_dir)
-            results['pipeline_steps'].append('plot')
-            self.logger.info("✓ Plotting completed")
-        else:
-            self.logger.info("Step 5/5: Skipping plot generation")
-
-        if run_archive:
-            self.logger.info("Archiving results...")
-            archive_file = self.archive_results(network_dir)
-            results['archive_file'] = str(archive_file)
-            results['pipeline_steps'].append('archive')
-            self.logger.info("✓ Archiving completed")
-
-        self.logger.info(f"✓ Complete pipeline finished: {network_dir}")
-        self.logger.info(f"Completed steps: {' → '.join(results['pipeline_steps'])}")
-        return results
-
-
-def check_tornettools_installation():
-    """Check if tornettools is installed and accessible"""
-    try:
-        result = subprocess.run(['tornettools', '-h'], capture_output=True, timeout=5)
-        return result.returncode == 0
-    except (subprocess.SubprocessError, FileNotFoundError):
+    @staticmethod
+    def _is_client_host(hostname: str, host_entry: Dict[str, Any]) -> bool:
+        """Return True for hosts that are traffic-generating clients."""
+        if hostname.startswith("torclient"):
+            return True
+        for proc in host_entry.get("processes", []):
+            path = str(proc.get("path", ""))
+            if "tgen" in path or "tgenrs" in path:
+                return True
         return False
 
+    @staticmethod
+    def _parse_tor_ports(host_entry: Dict[str, Any]) -> Dict[str, Optional[int]]:
+        """Extract SocksPort and ControlPort from the host's tor process args."""
+        for proc in host_entry.get("processes", []):
+            path = str(proc.get("path", ""))
+            if "tor" in path and "oniontrace" not in path:
+                args = str(proc.get("args", ""))
+                socks = re.search(r"--SocksPort\s+(\d+)", args)
+                ctrl = re.search(r"--ControlPort\s+(\d+)", args)
+                return {
+                    "socks_port": int(socks.group(1)) if socks else None,
+                    "control_port": int(ctrl.group(1)) if ctrl else None,
+                }
+        return {"socks_port": None, "control_port": None}
 
-def get_tornettools_version():
-    """Get tornettools version"""
-    try:
-        result = subprocess.run(['tornettools', '--version'], capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except (subprocess.SubprocessError, FileNotFoundError):
-        pass
-    return None
+    @staticmethod
+    def _host_data_dir(network_dir: Path, hostname: str) -> Path:
+        """Return the template data directory for a Shadow host."""
+        for candidate in (
+            network_dir / "shadow.data.template" / "hosts" / hostname,
+            network_dir / hostname,
+        ):
+            if candidate.exists():
+                return candidate
+        return network_dir / "shadow.data.template" / "hosts" / hostname
+
+    def _apply_group_to_host(
+            self,
+            host_entry: Dict[str, Any],
+            group: CustomClientGroup,
+            substitutions: Dict[str, Any],
+            data_dir: Path,
+    ) -> None:
+        """Modify *host_entry* in-place according to *group* settings."""
+        processes: List[Dict[str, Any]] = host_entry.get("processes", [])
+
+        if group.tor_binary:
+            for proc in processes:
+                path = str(proc.get("path", ""))
+                if "tor" in path and "oniontrace" not in path and "tgen" not in path:
+                    self.logger.debug(
+                        " %s: replacing tor binary %s → %s",
+                        substitutions["hostname"], proc["path"], group.tor_binary,
+                    )
+                    proc["path"] = group.tor_binary
+                    break
+
+        if group.torrc_append:
+            self._append_to_torrc(data_dir, group.torrc_append, group.name)
+
+        if group.replace_default_traffic:
+            processes = [
+                p for p in processes
+                if "tgen" not in str(p.get("path", ""))
+                and "tgenrs" not in str(p.get("path", ""))
+            ]
+
+        for client_proc in group.processes:
+            processes.append(client_proc.to_shadow_entry(substitutions))
+
+        host_entry["processes"] = processes
+
+    def _append_to_torrc(
+        self,
+        data_dir: Path,
+        options: Dict[str, str],
+        group_name: str,
+    ) -> None:
+        """Append *options* to the host's torrc as ``%include`` of a side-file."""
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        extra_path = data_dir / f"torrc.{group_name}.extra"
+        lines = [f"{k} {v}" for k, v in options.items()]
+        extra_path.write_text("\n".join(lines) + "\n")
+
+        torrc_path = data_dir / "torrc"
+        if torrc_path.exists():
+            existing = torrc_path.read_text()
+            include_line = f"%include {extra_path.name}"
+            if include_line not in existing:
+                torrc_path.write_text(existing.rstrip("\n") + f"\n{include_line}\n")
+        else:
+            self.logger.debug(
+                "torrc not found at %s — extra options file written but not included.",
+                torrc_path,
+            )
