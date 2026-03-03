@@ -298,3 +298,45 @@ def plot_correlation_matrix(
         A ``matplotlib.figure.Figure``.
     """
     raise NotImplementedError
+
+def plot_group_metrics_bar(
+    group_metrics,
+    metrics=None,
+    title="Identification Metrics by Client Group",
+    save_path=None,
+):
+    """Grouped bar chart comparing identification metrics across client groups.
+
+    Each cluster of bars corresponds to one metric; each bar within the
+    cluster represents one group (e.g. probe, baseline, general).
+
+    Args:
+        group_metrics: Mapping of group name to metrics dict.
+        metrics: Subset of metric keys to display. Defaults to
+            ["success_rate", "coverage", "conditional_accuracy"].
+        title: Figure title.
+        save_path: When provided, the figure is saved here before returning.
+
+    Returns:
+        A matplotlib.figure.Figure.
+    """
+    raise NotImplementedError
+
+
+def plot_group_success_breakdown(
+    group_metrics,
+    title="Circuit Counts by Client Group",
+    save_path=None,
+):
+    """Stacked bar chart showing attempted / correct / missed circuits per group.
+
+    Args:
+        group_metrics: Mapping of group name to metrics dict containing
+            total_observed, attempted, and correct keys.
+        title: Figure title.
+        save_path: Optional save path.
+
+    Returns:
+        A matplotlib.figure.Figure.
+    """
+    raise NotImplementedError

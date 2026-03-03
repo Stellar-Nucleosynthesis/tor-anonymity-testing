@@ -2,6 +2,7 @@ import abc
 import base64
 import binascii
 import dataclasses
+import glob
 import logging
 import re
 import time
@@ -724,8 +725,11 @@ class BaseAttack(abc.ABC):
             Path to the first matching log file, or ``None`` when no
             OnionTrace log exists in ``relay_dir``.
         """
-        p = relay_dir / "oniontrace.1003.stdout"
-        return p if p.is_file() else None
+        p = relay_dir / "oniontrace.*.stdout"
+        files = glob.glob(str(p))
+        if not files:
+            return None
+        return Path(files[0])
 
     @staticmethod
     def _b64_fingerprint_to_hex(b64: str) -> str:
