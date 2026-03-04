@@ -38,6 +38,14 @@ class AttackConfig:
         time_window: Correlation time window passed to ``CorrelationAnalyzer``.
         bin_size: Width in seconds of each time bin used for traffic
             histogramming.
+        client_filter: When set, restricts ground-truth building (and therefore
+            all correlation and metrics) to circuits originating from a specific
+            set of client hosts. Accepted formats:
+            * ``"group:<n>"``  — all hosts in that injection group, resolved
+              via ``custom_clients_manifest.json`` written by
+              ``inject_custom_clients``.
+            * ``"host:h1,h2"`` — explicit comma-separated Shadow hostnames.
+            * ``None`` (default) — no filtering; all client circuits are used.
         extra: Free-form dict for scenario-specific parameters that do not
             belong to the common fields.
     """
@@ -52,6 +60,7 @@ class AttackConfig:
     correlation_threshold: float = 0.9
     time_window: float = 30
     bin_size: float = 0.1
+    client_filter: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -626,7 +635,7 @@ class BaseAttack(abc.ABC):
             return {}
 
         logger.info(
-            "Parsing %d host directories from %s …",
+            "Parsing %d host directories from %s ...",
             len(host_dirs), hosts_dir,
         )
 

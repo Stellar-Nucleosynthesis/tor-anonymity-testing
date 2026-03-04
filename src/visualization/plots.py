@@ -118,9 +118,6 @@ def plot_significance_heatmap(
     raise NotImplementedError
 
 
-# ---------------------------------------------------------------------------
-# Single-simulation diagnostics
-# ---------------------------------------------------------------------------
 
 def plot_accuracy_coverage(
     sweep: ThresholdSweep,
@@ -231,7 +228,7 @@ def plot_seed_success_timeline(
     remains stable.
 
     Args:
-        seed_labels: Ordered seed labels (e.g. ``["seed_0", "seed_1", …]``).
+        seed_labels: Ordered seed labels (e.g. ``["seed_0", "seed_1", ...]``).
         seed_metrics: One metrics dict per seed in the same order.
         metric: Metric key to plot on the y-axis.
         title: Figure title.  Defaults to ``"{metric} Across Seeds"``.

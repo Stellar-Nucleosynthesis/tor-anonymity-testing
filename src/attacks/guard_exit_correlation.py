@@ -49,10 +49,10 @@ class GuardExitAttack(BaseAttack):
     )
 
     def __init__(
-        self,
-        config: GuardExitConfig,
-        workspace: Optional[Path] = None,
-        synthetic: bool = False,
+            self,
+            config: GuardExitConfig,
+            workspace: Optional[Path] = None,
+            synthetic: bool = False,
     ):
         """Initialize the attack.
 
@@ -71,8 +71,8 @@ class GuardExitAttack(BaseAttack):
         self._adversary_exits: List[str] = []
 
     def _build_adversary_relay_list(
-        self,
-        network_data: Dict[str, Any]
+            self,
+            network_data: Dict[str, Any]
     ) -> Tuple[List[str], List[str], List[str]]:
         """Partition relays by role and select the adversary subset.
 
@@ -121,7 +121,7 @@ class GuardExitAttack(BaseAttack):
         )
 
         self.logger.info(
-            "Adversary relays — guards: %d/%d, exits: %d/%d, middles: %d/%d",
+            "Adversary relays - guards: %d/%d, exits: %d/%d, middles: %d/%d",
             len(adv_guards), len(guards),
             len(adv_exits), len(exits),
             len(adv_middles), len(middles),
@@ -173,8 +173,7 @@ class GuardExitAttack(BaseAttack):
             if self.synthetic:
                 return self._generate_synthetic_results(seed)
             self.logger.warning(
-                "No shadow.data/hosts directory found in %s — skipping seed.",
-                sim_dir,
+                "No shadow.data/hosts directory found in %s - skipping seed.", sim_dir,
             )
             return []
 
@@ -194,17 +193,20 @@ class GuardExitAttack(BaseAttack):
 
         if not guard_profiles or not exit_profiles:
             self.logger.warning(
-                "Seed=%d: guard_profiles=%d, exit_profiles=%d — insufficient data.",
+                "Seed=%d: guard_profiles=%d, exit_profiles=%d - insufficient data.",
                 seed,
                 len(guard_profiles),
                 len(exit_profiles),
             )
             return self._generate_synthetic_results(seed)
 
-        ground_truth = self._build_ground_truth(hosts_dir)
+        client_hostnames = self._resolve_client_filter(sim_dir)
+        ground_truth, path_to_client = self._build_ground_truth(
+            hosts_dir, client_filter=client_hostnames
+        )
 
         results = self._correlate_all_pairs(
-            guard_profiles, exit_profiles, ground_truth, seed=seed
+            guard_profiles, exit_profiles, ground_truth, path_to_client, seed=seed
         )
 
         circuits_for_stats = list(ground_truth.values())
@@ -215,7 +217,7 @@ class GuardExitAttack(BaseAttack):
                 self._adversary_exits,
             )
             self.logger.info(
-                "Seed=%d compromise — guard: %.1f%%, exit: %.1f%%, both: %.1f%%",
+                "Seed=%d compromise - guard: %.1f%%, exit: %.1f%%, both: %.1f%%",
                 seed,
                 stats["guard_compromise_rate"] * 100,
                 stats["exit_compromise_rate"] * 100,
@@ -229,31 +231,77 @@ class GuardExitAttack(BaseAttack):
 
         return results
 
-    def _build_ground_truth(self, hosts_dir: Path) -> Dict[str, Dict[str, str]]:
-        """Build a ``"hostname/local_cid"`` → relay-hostname mapping.
+    def _resolve_client_filter(self, sim_dir: Path) -> Optional[set]:
+        """Return the set of allowed client hostnames for this seed, or ``None``.
 
-        Iterates every OnionTrace log under ``hosts_dir`` and extracts
-        ``CIRC BUILT`` events.  Because every relay that is part of a circuit
-        logs the same three-hop path, the first occurrence of each
-        ``(hostname, local_cid)`` pair is sufficient.
-
-        The resulting dict is keyed by ``"hostname/local_cid"``, which is
-        exactly the ``circuit_id`` format used by
-        ``_load_profiles_from_oniontrace`` (inherited from ``BaseAttack``).
-        This means ``ground_truth.get(profile.circuit_id)`` resolves without
-        any additional lookup step.
+        Loads ``custom_clients_manifest.json`` from the network directory
+        (produced by ``inject_custom_clients``) and resolves
+        ``ge_config.client_filter`` against it.  Returns ``None`` when no
+        filter is configured, which preserves existing all-circuits behavior.
 
         Args:
-            hosts_dir: Path to the ``shadow.data/hosts/`` directory whose
-                subdirectories each contain an OnionTrace log.
+            sim_dir: Root seed directory (``runs/seed_N/``).
 
         Returns:
-            A dict mapping ``"hostname/local_cid"`` strings to inner dicts
-            with keys ``"guard"``, ``"middle"``, and ``"exit"``, each holding
-            a relay hostname string. Returns an empty dict
-            when no ``CIRC BUILT`` events are found.
+            A ``set`` of Shadow hostnames to include, or ``None`` for no
+            filtering.
+        """
+        if not self.ge_config.client_filter:
+            return None
+
+        from src.simulation.orchestrator import CustomClientsManifest
+        manifest = None
+        for candidate in sim_dir.rglob("custom_clients_manifest.json"):
+            manifest = CustomClientsManifest.load(candidate.parent)
+            break
+
+        if manifest is None:
+            self.logger.warning(
+                "client_filter=%r set but no custom_clients_manifest.json found "
+                "under %s — filter ignored.",
+                self.ge_config.client_filter, sim_dir,
+            )
+            return None
+
+        hostnames = manifest.resolve_filter(self.ge_config.client_filter)
+        if hostnames is None:
+            self.logger.warning(
+                "client_filter=%r did not match any group in the manifest — "
+                "filter ignored.",
+                self.ge_config.client_filter,
+            )
+            return None
+
+        self.logger.info(
+            "client_filter=%r → %d host(s): %s",
+            self.ge_config.client_filter,
+            len(hostnames),
+            hostnames if len(hostnames) <= 6 else hostnames[:6] + ["..."],
+        )
+        return set(hostnames)
+
+    def _build_ground_truth(
+            self,
+            hosts_dir: Path,
+            client_filter: Optional[set] = None,
+    ) -> Tuple[Dict[str, Dict[str, str]], Dict[Tuple[str, str, str], str]]:
+        """Build ground truth and a path-to-client mapping from OnionTrace logs.
+
+        Iterates every OnionTrace log under ``hosts_dir`` and extracts
+        ``CIRC BUILT`` events.
+
+        Returns:
+            A tuple of:
+            - ``ground_truth``: mapping ``"hostname/local_cid"`` to
+              ``{"guard", "middle", "exit"}`` relay hostnames.
+            - ``path_to_client``: mapping ``(guard, middle, exit)`` to the
+              torclient hostname that built that path.  Used to tag
+              ``DeanonymizationResult.client_id`` with the originating client
+              so that results can be split by group in the analysis step.
+              First-seen semantics when multiple clients use the same path.
         """
         ground_truth: Dict[str, Dict[str, str]] = {}
+        path_to_client: Dict[Tuple[str, str, str], str] = {}
 
         for host_dir in sorted(hosts_dir.iterdir()):
             if not host_dir.is_dir():
@@ -262,8 +310,16 @@ class GuardExitAttack(BaseAttack):
             if log_path is None:
                 continue
 
+            hostname = host_dir.name
+
+            is_client = not any(
+                hostname.startswith(pfx)
+                for pfx in ("relayguard", "relayexit", "relay")
+            )
+            if client_filter is not None and is_client and hostname not in client_filter:
+                continue
             for local_cid, path_str in self._iter_circ_built(log_path):
-                key = f"{host_dir.name}/{local_cid}"
+                key = f"{hostname}/{local_cid}"
                 if key in ground_truth:
                     continue
                 parsed = self._parse_circ_path(path_str)
@@ -274,13 +330,17 @@ class GuardExitAttack(BaseAttack):
                         "middle": middle_name,
                         "exit":   exit_name,
                     }
+                    if hostname.startswith("torclient"):
+                        path_key = (guard_name, middle_name, exit_name)
+                        if path_key not in path_to_client:
+                            path_to_client[path_key] = hostname
 
         self.logger.debug(
-            "Built ground truth for %d (hostname, cid) entries from %s.",
-            len(ground_truth),
-            hosts_dir,
+            "Built ground truth for %d (hostname, cid) entries; "
+            "%d path-client mappings from %s.",
+            len(ground_truth), len(path_to_client), hosts_dir,
         )
-        return ground_truth
+        return ground_truth, path_to_client
 
     def _iter_circ_built(self, log_path: Path) -> Iterator[Tuple[str, str]]:
         """Yield ``(local_circuit_id, path_string)`` for every ``CIRC BUILT`` event.
@@ -403,22 +463,10 @@ class GuardExitAttack(BaseAttack):
             guard_profiles: List[TrafficProfile],
             exit_profiles: List[TrafficProfile],
             ground_truth: Dict[str, Dict[str, str]],
+            path_to_client: Dict[Tuple[str, str, str], str],
             seed: int,
     ) -> List[DeanonymizationResult]:
-        """Cross-correlate guard–exit profile pairs using a two-stage index.
-
-        **Complexity**
-
-        Naïve M × N correlation is replaced by:
-
-        * O(N log N) — sort exit profiles once by ``first_packet_time``.
-        * O(M log N) — binary-search per guard profile for temporally
-          overlapping candidates.
-        * O(M · k · C) — run ``CorrelationAnalyzer`` only on surviving
-          candidates, where k << N because circuits are short-lived and at
-          most a handful are concurrently active on any given second.
-
-        **Success criterion**
+        """Cross-correlate guard-exit profile pairs.
 
         Guard and exit ``circuit_id`` values are ``"hostname/local_cid"``
         strings that are never directly comparable across relays.  Success is
@@ -432,6 +480,10 @@ class GuardExitAttack(BaseAttack):
                 as returned by ``_load_profiles_from_oniontrace``.
             ground_truth: Mapping of ``"hostname/local_cid"`` to relay
                 hostname dicts, as returned by ``_build_ground_truth``.
+            path_to_client: mapping (built by ``_build_ground_truth``)
+                used to embed the originating torclient hostname in each result's
+                ``client_id`` field as
+                ``"client_seed{N}_{client_hostname}__{guard_host}/{local_cid}"``.
             seed: Seed index embedded in ``DeanonymizationResult.client_id``
                 for traceability.
 
@@ -453,6 +505,11 @@ class GuardExitAttack(BaseAttack):
             true_guard = (g_canon or {}).get("guard", "unknown")
             true_exit = (g_canon or {}).get("exit", "unknown")
 
+            client_hostname = "unknown"
+            if g_canon:
+                path_key = (g_canon["guard"], g_canon["middle"], g_canon["exit"])
+                client_hostname = path_to_client.get(path_key, "unknown")
+
             candidates = self._candidates_for_guard(g_prof, sorted_exits, exit_starts)
             total_candidates += len(candidates)
 
@@ -473,7 +530,7 @@ class GuardExitAttack(BaseAttack):
             if not candidate_scores:
                 results.append(
                     DeanonymizationResult(
-                        client_id=f"client_seed{seed}_{g_prof.circuit_id}",
+                        client_id=f"client_seed{seed}_{client_hostname}__{g_prof.circuit_id}",
                         circuit_id=g_prof.circuit_id,
                         true_guard=true_guard,
                         true_exit=true_exit,
@@ -505,7 +562,7 @@ class GuardExitAttack(BaseAttack):
 
             results.append(
                 DeanonymizationResult(
-                    client_id=f"client_seed{seed}_{g_prof.circuit_id}",
+                    client_id=f"client_seed{seed}_{client_hostname}__{g_prof.circuit_id}",
                     circuit_id=g_prof.circuit_id,
                     true_guard=true_guard,
                     true_exit=true_exit,
@@ -524,7 +581,7 @@ class GuardExitAttack(BaseAttack):
             "%d pair(s) evaluated (%.1f avg/guard; brute-force would be %d).",
             len(guard_profiles), len(exit_profiles),
             total_candidates, total_candidates / max(len(guard_profiles), 1),
-                              len(guard_profiles) * len(exit_profiles),
+            len(guard_profiles) * len(exit_profiles),
         )
         self.logger.debug(
             f"Falsely discarded true exits for {falsely_filtered} guard profile(s) "

@@ -50,15 +50,21 @@ Usage
 import argparse
 import json
 import logging
+import re
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+from src.analysis.metrics import compare_scenarios, compute_seed_variance
+from src.analysis.deanonymization import evaluate_attack
+from src.visualization import plots as vplots
+
+matplotlib.use("Agg")
 
 def _configure_logging(level: str) -> None:
     logging.basicConfig(
@@ -71,13 +77,14 @@ def _configure_logging(level: str) -> None:
 logger = logging.getLogger("analyze")
 
 _ALL_PLOTS = frozenset({
-    "success_bar",          # grouped bar chart — metrics across scenarios
-    "success_line",         # line chart — metric vs. parameter sweep
+    "success_bar",          # grouped bar chart - metrics across scenarios
+    "success_line",         # line chart - metric vs. parameter sweep
     "accuracy_coverage",    # threshold-sweep curve for each scenario
     "score_dist",           # histogram of scores: correct vs. incorrect
     "timing",               # timing distribution box plot
     "seed_variance",        # box plot of per-seed success rates
     "ge_matrix",            # guard-fraction × exit-fraction heatmap (guard-exit only)
+    "group_metrics",        # bar chart comparing metrics across client groups
 })
 
 _PLOT_HELP = (
@@ -283,6 +290,17 @@ def _add_guard_exit_args(p: argparse.ArgumentParser) -> None:
             "Auto-generated from option values when omitted."
         ),
     )
+    p.add_argument(
+        "--client-filter",
+        metavar="SPEC",
+        default=None,
+        help=(
+            "Restrict analysis to circuits from a specific group of client hosts. "
+            "Formats: 'group:<name>' (injection group from custom_clients_manifest.json), "
+            "'host:h1,h2' (explicit Shadow hostnames). "
+            "When omitted all client circuits are used."
+        ),
+    )
 
 
 def _build_guard_exit_config(args: argparse.Namespace, num_seeds: int) -> Any:
@@ -311,6 +329,7 @@ def _build_guard_exit_config(args: argparse.Namespace, num_seeds: int) -> Any:
         correlation_threshold=args.threshold,
         time_window=args.max_time_lag,
         bin_size=args.bin_size,
+        client_filter=args.client_filter,
     )
 
 def _resolve_sim_dirs(
@@ -409,9 +428,6 @@ def _render_report(
         output_dir:   destination directory.
         plot_set:     set of plot names to generate.
     """
-    from src.analysis.metrics import compare_scenarios, compute_seed_variance
-    from src.visualization import plots as vplots
-
     for key, res in results.items():
         print("\n" + "─" * 60)
         print(res.summary())
@@ -467,6 +483,34 @@ def _render_report(
             logger.debug("plot_timing_distribution not yet implemented — skipping.")
         except Exception as exc:
             logger.warning("timing plot failed: %s", exc)
+
+    group_metrics_map: Dict[str, Dict[str, Any]] = {}
+    for key, res in results.items():
+        grp_split = _split_results_by_group(res.deanon_results)
+        group_metrics_map[key] = {
+            grp: evaluate_attack(grp_results)
+            for grp, grp_results in grp_split.items()
+        }
+
+    if "group_metrics" in plot_set:
+        for key, grp_metrics in group_metrics_map.items():
+            if len(grp_metrics) < 2:
+                logger.debug(
+                    "group_metrics: only one group in '%s' — skipping plot.", key
+                )
+                continue
+            try:
+                fig = vplots.plot_group_metrics_bar(
+                    grp_metrics,
+                    title=f"Group Metrics — {labels.get(key, key)}",
+                )
+                safe = key.replace(" ", "_").replace("/", "_")
+                _save_figure(fig, output_dir / f"{safe}_group_metrics.png")
+            except NotImplementedError:
+                logger.debug("plot_group_metrics_bar not yet implemented — skipping.")
+                break
+            except Exception as exc:
+                logger.warning("group_metrics plot for '%s' failed: %s", key, exc)
 
     if "seed_variance" in plot_set:
         per_seed_named = {labels.get(k, k): v for k, v in per_seed_map.items() if v}
@@ -527,6 +571,7 @@ def _render_report(
             "elapsed_seconds": res.elapsed_seconds,
             "num_circuits":    len(res.deanon_results),
             "metrics":         res.metrics,
+            "group_metrics":   group_metrics_map.get(key, {}),
             "seed_variance":   compute_seed_variance(res.per_seed_metrics),
             "extra_info":      res.extra_info,
             "threshold_sweep": sweeps.get(key, []),
@@ -643,15 +688,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.error("Scenario '%s' failed: %s", label, exc, exc_info=True)
             continue
 
-        total_observed = result.extra_info.get("total_guard_profiles_observed")
         result.metrics = evaluate_attack(result.deanon_results)
         per_seed_id_metrics: List[Dict[str, Any]] = []
         for seed_total, seed_results_group in _group_by_seed(
             result.deanon_results
         ):
-            per_seed_id_metrics.append(
-                evaluate_attack(seed_results_group)
-            )
+            per_seed_id_metrics.append(evaluate_attack(seed_results_group))
 
         results[key]      = result
         labels[key]       = label
@@ -679,6 +721,29 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     logger.info("Output written to: %s", output_dir)
     return 0
+
+
+def _split_results_by_group(
+    all_results: List[Any],
+) -> Dict[str, List[Any]]:
+    """Split DeanonymizationResult objects by the group encoded in client_id.
+
+    The group is embedded by GuardExitAttack._correlate_all_pairs as
+    "..._grp:{name}_...".  Results whose client_id contains no such
+    tag are placed in the "general" bucket.
+
+    Args:
+        all_results: Flat list of DeanonymizationResult objects.
+
+    Returns:
+        Dict mapping group name to list of results for that group.
+    """
+    groups: Dict[str, List[Any]] = {}
+    for r in all_results:
+        m = re.search(r"_grp:(\w+)_", r.client_id)
+        group = m.group(1) if m else "general"
+        groups.setdefault(group, []).append(r)
+    return groups
 
 
 def _group_by_seed(

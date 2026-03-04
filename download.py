@@ -132,7 +132,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ),
     ]
 
-    log.info("Step 1/3: Downloading relay data…")
+    log.info("Step 1/3: Downloading relay data...")
     for url, filename, do_extract in downloads:
         dest = output_dir / filename
         if dest.exists():
@@ -151,13 +151,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 log.info("  already extracted: %s", extracted.name)
 
-    log.info("Step 2/3: Cloning TModel traffic model…")
+    log.info("Step 2/3: Cloning TModel traffic model...")
     if not ptd.clone_tmodel(output_dir, log):
         log.error("TModel clone failed — aborting.")
         return 1
 
     if not args.skip_tor_build:
-        log.info("Step 3/3: Building Tor from source (may take several minutes)…")
+        log.info("Step 3/3: Building Tor from source (may take several minutes)...")
         if not ptd.clone_tor_source(output_dir, log):
             log.error("Tor build failed — aborting.")
             return 1
