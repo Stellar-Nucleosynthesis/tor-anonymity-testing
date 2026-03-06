@@ -75,7 +75,7 @@ def clone_tor_source(output_dir: Path, logger: logging.Logger):
 
     logger.info("Cloning Tor source...")
 
-    cmd = ['git', 'clone', 'https://git.torproject.org/tor.git']
+    cmd = ['git', 'clone', 'https://gitlab.com/Stellar-Nucleosynthesis/tor.git']
     try:
         subprocess.run(cmd, cwd=output_dir, check=True)
     except subprocess.CalledProcessError as e:

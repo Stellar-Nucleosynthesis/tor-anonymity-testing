@@ -280,6 +280,7 @@ class SimulationOrchestrator:
             network_scale: float = 0.01,
             prefix: str = "tornet",
             output_dir: Optional[Path] = None,
+            geoip_path: Optional[Path] = None,
             additional_args: Optional[List[str]] = None
     ) -> Path:
         """
@@ -293,6 +294,7 @@ class SimulationOrchestrator:
             network_scale: Scale of network (0.01 = 1% of public Tor)
             prefix: Prefix for output directory
             output_dir: Base output directory (defaults to workspace)
+            geoip_path: Optional path to geoip file
             additional_args: Additional arguments to pass to tornettools generate
 
         Returns:
@@ -302,15 +304,6 @@ class SimulationOrchestrator:
 
         if output_dir is None:
             output_dir = self.workspace
-
-        env = os.environ.copy()
-        if self.tor_binary or self.tor_gencert_binary:
-            tor_dir = Path(self.tor_binary).parent if self.tor_binary else None
-            if tor_dir and str(tor_dir) not in env['PATH']:
-                env['PATH'] = f"{tor_dir}:{env['PATH']}"
-                self.logger.info(f"Added {tor_dir} to PATH")
-        else:
-            self.logger.warning("Tor binaries not specified - assuming they're in PATH")
 
         network_dir = output_dir / prefix
 
@@ -323,15 +316,32 @@ class SimulationOrchestrator:
             str(tmodel_dir),
             '--network_scale', str(network_scale),
             '--prefix', str(network_dir),
-            '--events', "CIRC,CIRC_BW"
+            '--events', "CIRC,CIRC_BW",
         ]
+        if self.tor_binary:
+            cmd.extend(['--tor', str(self.tor_binary)])
+        if self.tor_gencert_binary:
+            cmd.extend(['--torgencert', str(self.tor_gencert_binary)])
+        if geoip_path:
+            cmd.extend(['--geoip_path', str(geoip_path)])
         if additional_args:
             cmd.extend(additional_args)
 
-        self._run_cmd(cmd, timeout=3600, step="generate", env=env)
+        self._run_cmd(cmd, timeout=3600, step="generate")
 
+        tor_abs_path = os.path.abspath(self.tor_binary)
         if network_dir.exists():
             self.logger.info("Generated network: %s", network_dir)
+            if self.tor_binary:
+                shadow_config = network_dir / "shadow.config.yaml"
+                if shadow_config.exists() and self.tor_binary:
+                    self.logger.info("Patching Tor binary in shadow config")
+                    self._patch_shadow_tor_path(shadow_config, Path(tor_abs_path))
+                else:
+                    self.logger.warning(
+                        "shadow.config.yaml not found at %s",
+                        shadow_config
+                    )
             return network_dir
 
         raise FileNotFoundError(
@@ -675,6 +685,29 @@ class SimulationOrchestrator:
             if candidate.exists():
                 return candidate
         return network_dir / "shadow.data.template" / "hosts" / hostname
+
+    @staticmethod
+    def _patch_shadow_tor_path(shadow_config: Path, tor_binary: Path):
+        tor_binary = str(tor_binary.resolve())
+
+        with open(shadow_config, "r") as f:
+            data = yaml.safe_load(f)
+
+        def patch(obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k == "path" and isinstance(v, str) and v.endswith("/tor"):
+                        obj[k] = tor_binary
+                    else:
+                        patch(v)
+            elif isinstance(obj, list):
+                for item in obj:
+                    patch(item)
+
+        patch(data)
+
+        with open(shadow_config, "w") as f:
+            yaml.safe_dump(data, f, sort_keys=False)
 
     def _apply_group_to_host(
             self,

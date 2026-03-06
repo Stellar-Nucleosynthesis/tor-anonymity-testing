@@ -27,6 +27,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from src.fetching import prepare_tor_data as ptd
+
 def _configure_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -78,15 +80,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     _configure_logging(args.log_level)
-
-    try:
-        from fetching import prepare_tor_data as ptd
-    except ImportError as exc:
-        logger.error(
-            "Cannot import prepare_tor_data.py — "
-            "make sure it is in the same directory.\n  %s", exc
-        )
-        return 1
 
     ptd.setup_logging(args.log_level)
     log = logging.getLogger("prepare_tor_data")

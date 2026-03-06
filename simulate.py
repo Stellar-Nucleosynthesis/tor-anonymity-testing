@@ -383,7 +383,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         orc = SimulationOrchestrator(
             workspace=seed_dir,
             tornettools_cmd=args.tornettools,
-            tor_binary=str(tor_binary)  if tor_binary  else None,
+            tor_binary=str(tor_binary) if tor_binary else None,
             tor_gencert_binary=str(tor_gencert) if tor_gencert else None,
         )
 
@@ -397,6 +397,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 network_scale=args.network_scale,
                 prefix="tornet",
                 output_dir=seed_dir,
+                geoip_path=geoip_path if geoip_path.exists() else None
             )
 
             if client_groups:
