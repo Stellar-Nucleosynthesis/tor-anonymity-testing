@@ -15,7 +15,7 @@ import yaml
 def setup_logging(log_level: str = "INFO") -> None:
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
-        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        format="%(asctime)s  %(levelname)-8s  %(name)s - %(message)s",
         datefmt="%H:%M:%S",
     )
 
@@ -28,12 +28,12 @@ class ClientProcess:
         path: Absolute path to the executable.
         args: Argument string. The following placeholders are substituted
             per-host at injection time:
-              ``{hostname}``      — Shadow host name, e.g. ``"torclient3"``.
-              ``{socks_port}``    — SOCKS port parsed from the host's tor args.
-              ``{control_port}``  — ControlPort parsed from the host's tor args.
-              ``{data_dir}``      — Absolute path to the host's data directory
+              ``{hostname}``      - Shadow host name, e.g. ``"torclient3"``.
+              ``{socks_port}``    - SOCKS port parsed from the host's tor args.
+              ``{control_port}``  - ControlPort parsed from the host's tor args.
+              ``{data_dir}``      - Absolute path to the host's data directory
                                     inside ``shadow.data.template/``.
-              ``{torrc_dir}``     — Same as ``{data_dir}`` (convenience alias).
+              ``{torrc_dir}``     - Same as ``{data_dir}`` (convenience alias).
         start_time: Shadow virtual start time, e.g. ``"300s"`` or ``300``.
         environment: Extra environment variables for this process.
     """
@@ -156,8 +156,8 @@ class CustomClientsManifest:
         """Resolve a filter spec to a list of hostnames.
 
         Supported formats:
-          ``group:probe``                    — all hosts in the named group.
-          ``host:torclient3,torclient7``     — explicit comma-separated hostnames.
+          ``group:probe``                    - all hosts in the named group.
+          ``host:torclient3,torclient7``     - explicit comma-separated hostnames.
 
         Returns ``None`` when the spec format is unrecognized.
         """
@@ -766,6 +766,6 @@ class SimulationOrchestrator:
                 torrc_path.write_text(existing.rstrip("\n") + f"\n{include_line}\n")
         else:
             self.logger.debug(
-                "torrc not found at %s — extra options file written but not included.",
+                "torrc not found at %s - extra options file written but not included.",
                 torrc_path,
             )

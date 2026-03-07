@@ -194,8 +194,8 @@ def compare_scenarios(
     Returns:
         Dict with:
 
-        * ``scenarios`` — list of labels.
-        * ``metrics_comparison`` — per-metric sub-dict with ``values``,
+        * ``scenarios`` - list of labels.
+        * ``metrics_comparison`` - per-metric sub-dict with ``values``,
           ``best_scenario``, ``mean``, and ``std`` across scenarios.
     """
     lower_is_better = {"abstention_rate", "mean_time_s", "mean_score_incorrect"}
@@ -245,7 +245,7 @@ def statistical_significance(
 ) -> Dict[str, Any]:
     """Test whether two scenarios differ significantly in identification success.
 
-    Uses a Mann-Whitney U-test on correlation scores — valid for unequal
+    Uses a Mann-Whitney U-test on correlation scores - valid for unequal
     sample sizes and makes no normality assumption.
 
     Args:

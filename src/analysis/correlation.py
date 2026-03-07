@@ -12,6 +12,7 @@ import logging
 @dataclass
 class TrafficProfile:
     """Represents traffic observations from a single observation point"""
+    hostname: str
     circuit_id: str
     timestamps: np.ndarray
     packet_sizes: np.ndarray
@@ -22,11 +23,9 @@ class TrafficProfile:
     total_bytes: int
     total_packets: int
     observation_point: str
-    metadata: Dict[str, Any] = None
 
     def __post_init__(self):
-        if self.metadata is None:
-            self.metadata = {}
+        pass
 
 
 def dtw_distance(
@@ -183,6 +182,7 @@ def time_shift_search(
 
     for shift in shifts:
         shifted_profile = TrafficProfile(
+            profile2.hostname,
             circuit_id=profile2.circuit_id,
             timestamps=profile2.timestamps + shift,
             packet_sizes=profile2.packet_sizes,
@@ -193,7 +193,6 @@ def time_shift_search(
             total_bytes=profile2.total_bytes,
             total_packets=profile2.total_packets,
             observation_point=profile2.observation_point,
-            metadata=profile2.metadata
         )
 
         corr, _ = cross_correlation(profile1, shifted_profile)

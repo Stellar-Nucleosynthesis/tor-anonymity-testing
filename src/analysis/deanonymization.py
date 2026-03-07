@@ -15,31 +15,22 @@ class DeanonymizationResult:
     """One top-1 identification attempt for a single guard-side circuit.
 
     Attributes:
-        client_id: Unique identifier for the relay.
-        circuit_id: Scoped ``"hostname/local_cid"`` string from the guard log.
-        true_guard: Hostname of the actual guard relay used by this circuit.
-        true_exit: Hostname of the actual exit relay used by this circuit.
-        predicted_guard: Guard hostname the attack attributed this circuit to,
-            or ``None`` when the adversary does not control the guard.
-        predicted_exit: Exit hostname ranked first by the attack, or ``None``
-            when no candidate cleared the threshold.
-        confidence: Normalised confidence in the top-1 prediction (0–1).
-        correlation_score: Raw primary correlation score for the top-ranked
-            candidate (e.g. cross-correlation coefficient).
-        time_to_identify: Wall-clock seconds spent on this circuit.
+        seed: Simulation seed.
+        origin_id: Unique identifier for the origin relay.
+        circuit_id: Scoped local circuit identifier from the origin.
         attempted: ``True`` if attempt to deanonymize was made.
         successful: ``True`` when the top-ranked candidate is the correct
             exit and the score clears the decision threshold.
+        confidence: Normalised confidence in the top-1 prediction (0–1).
+        correlation_score: Raw correlation score for the top-ranked
+            candidate (e.g. cross-correlation coefficient).
+        time_to_identify: Wall-clock seconds spent on this circuit.
     """
-
-    client_id: str
+    seed: str
+    origin_id: str
     circuit_id: str
-    true_guard: str
-    true_exit: str
     attempted: bool
     successful: bool
-    predicted_guard: Optional[str] = None
-    predicted_exit: Optional[str] = None
     confidence: Optional[float] = None
     correlation_score: Optional[float] = None
     time_to_identify: Optional[float] = None

@@ -1,4 +1,4 @@
-"""Step 2 — Run Shadow/tornettools network simulations.
+"""Step 2 - Run Shadow/tornettools network simulations.
 
 Runs the tornettools pipeline for each seed:
 
@@ -50,11 +50,11 @@ The file must contain a JSON array.  Each element describes one group::
     ]
 
 Placeholders available in ``args``:
-    {hostname}      — Shadow host name, e.g. "torclient3"
-    {socks_port}    — Tor SOCKS port for this host
-    {control_port}  — Tor ControlPort for this host
-    {data_dir}      — Absolute path to the host's template data directory
-    {torrc_dir}     — Alias for {data_dir}
+    {hostname}      - Shadow host name, e.g. "torclient3"
+    {socks_port}    - Tor SOCKS port for this host
+    {control_port}  - Tor ControlPort for this host
+    {data_dir}      - Absolute path to the host's template data directory
+    {torrc_dir}     - Alias for {data_dir}
 
 Usage
 -----
@@ -91,7 +91,7 @@ from src.simulation.orchestrator import (
 def _configure_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        format="%(asctime)s  %(levelname)-8s  %(name)s - %(message)s",
         datefmt="%H:%M:%S",
     )
 
@@ -322,7 +322,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         if total_frac > 1.0:
             logger.error(
-                "Total client-group fraction (%.2f) exceeds 1.0 — aborting.",
+                "Total client-group fraction (%.2f) exceeds 1.0 - aborting.",
                 total_frac,
             )
             return 1
@@ -366,7 +366,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for key in ("relayinfo", "userinfo", "networkinfo"):
         if not staged.get(key):
             logger.error(
-                "Stage produced incomplete output — missing '%s'. "
+                "Stage produced incomplete output - missing '%s'. "
                 "Check tornettools stage logs in %s.",
                 key, stage_workspace,
             )
@@ -413,7 +413,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 for gname, hosts in manifest.groups.items():
                     display = hosts if len(hosts) <= 5 else hosts[:5] + ["..."]
                     logger.info(
-                        "[seed %d]   group '%s': %d host(s) — %s",
+                        "[seed %d]   group '%s': %d host(s) - %s",
                         seed_idx, gname, len(hosts), display,
                     )
 

@@ -1,4 +1,4 @@
-"""Step 3 — Run deanonymization attack analysis on simulation output.
+"""Step 3 - Run deanonymization attack analysis on simulation output.
 
 Each attack class is a distinct deanonymization technique with its own set
 of options. One or more attack scenarios can be specified in a single
@@ -7,14 +7,14 @@ by side.
 
 Metrics used
 ------------
-  success_rate            — fraction of all observed circuits correctly
+  success_rate            - fraction of all observed circuits correctly
                             identified (unconditional).
-  coverage                — fraction of circuits for which a prediction was
+  coverage                - fraction of circuits for which a prediction was
                             made (at least one candidate found).
-  conditional_accuracy    — fraction of predictions that were correct.
-  score_separation        — mean(score|correct) − mean(score|incorrect),
+  conditional_accuracy    - fraction of predictions that were correct.
+  score_separation        - mean(score|correct) − mean(score|incorrect),
                             a measure of discriminability.
-  timing                  — mean / median / p95 wall-clock seconds per circuit.
+  timing                  - mean / median / p95 wall-clock seconds per circuit.
 
 Attack classes available
 ------------------------
@@ -24,7 +24,7 @@ Attack classes available
 Usage
 -----
 
-  # Quick demo — one guard-exit scenario, synthetic data
+  # Quick demo - one guard-exit scenario, synthetic data
   python analyze.py --synthetic guard-exit
 
   # Single scenario from real simulation logs
@@ -69,7 +69,7 @@ matplotlib.use("Agg")
 def _configure_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        format="%(asctime)s  %(levelname)-8s  %(name)s - %(message)s",
         datefmt="%H:%M:%S",
     )
 
@@ -341,7 +341,7 @@ def _resolve_sim_dirs(
         dirs = global_args.sim_dirs
         if len(dirs) < num_seeds:
             logger.warning(
-                "Only %d sim dir(s) supplied but scenario needs %d seeds — reusing.",
+                "Only %d sim dir(s) supplied but scenario needs %d seeds - reusing.",
                 len(dirs), num_seeds,
             )
             return [dirs[i % len(dirs)] for i in range(num_seeds)]
@@ -440,7 +440,7 @@ def _render_report(
             fig = vplots.plot_success_rate_bar(scenario_metrics)
             _save_figure(fig, output_dir / "success_rate_bar.png")
         except NotImplementedError:
-            logger.debug("plot_success_rate_bar not yet implemented — skipping.")
+            logger.debug("plot_success_rate_bar not yet implemented - skipping.")
         except Exception as exc:
             logger.warning("success_bar plot failed: %s", exc)
 
@@ -455,7 +455,7 @@ def _render_report(
                 fig = vplots.plot_accuracy_coverage_multi(named_sweeps)
                 _save_figure(fig, output_dir / "accuracy_coverage_multi.png")
         except NotImplementedError:
-            logger.debug("accuracy_coverage plots not yet implemented — skipping.")
+            logger.debug("accuracy_coverage plots not yet implemented - skipping.")
         except Exception as exc:
             logger.warning("accuracy_coverage plot failed: %s", exc)
 
@@ -463,12 +463,12 @@ def _render_report(
         for key, dres in deanon_map.items():
             try:
                 fig = vplots.plot_score_distribution(
-                    dres, title=f"Score Distribution — {labels.get(key, key)}"
+                    dres, title=f"Score Distribution - {labels.get(key, key)}"
                 )
                 safe = key.replace(" ", "_").replace("/", "_")
                 _save_figure(fig, output_dir / f"{safe}_score_dist.png")
             except NotImplementedError:
-                logger.debug("plot_score_distribution not yet implemented — skipping.")
+                logger.debug("plot_score_distribution not yet implemented - skipping.")
                 break
             except Exception as exc:
                 logger.warning("score_dist for '%s' failed: %s", key, exc)
@@ -480,7 +480,7 @@ def _render_report(
             )
             _save_figure(fig, output_dir / "timing_distribution.png")
         except NotImplementedError:
-            logger.debug("plot_timing_distribution not yet implemented — skipping.")
+            logger.debug("plot_timing_distribution not yet implemented - skipping.")
         except Exception as exc:
             logger.warning("timing plot failed: %s", exc)
 
@@ -496,18 +496,18 @@ def _render_report(
         for key, grp_metrics in group_metrics_map.items():
             if len(grp_metrics) < 2:
                 logger.debug(
-                    "group_metrics: only one group in '%s' — skipping plot.", key
+                    "group_metrics: only one group in '%s' - skipping plot.", key
                 )
                 continue
             try:
                 fig = vplots.plot_group_metrics_bar(
                     grp_metrics,
-                    title=f"Group Metrics — {labels.get(key, key)}",
+                    title=f"Group Metrics - {labels.get(key, key)}",
                 )
                 safe = key.replace(" ", "_").replace("/", "_")
                 _save_figure(fig, output_dir / f"{safe}_group_metrics.png")
             except NotImplementedError:
-                logger.debug("plot_group_metrics_bar not yet implemented — skipping.")
+                logger.debug("plot_group_metrics_bar not yet implemented - skipping.")
                 break
             except Exception as exc:
                 logger.warning("group_metrics plot for '%s' failed: %s", key, exc)
@@ -519,7 +519,7 @@ def _render_report(
                 fig = vplots.plot_seed_variance_box(per_seed_named)
                 _save_figure(fig, output_dir / "seed_variance.png")
             except NotImplementedError:
-                logger.debug("plot_seed_variance_box not yet implemented — skipping.")
+                logger.debug("plot_seed_variance_box not yet implemented - skipping.")
             except Exception as exc:
                 logger.warning("seed_variance plot failed: %s", exc)
 
@@ -543,20 +543,20 @@ def _render_report(
                 fig = vplots.plot_guard_exit_matrix(gf_set, ef_set, matrix)
                 _save_figure(fig, output_dir / "guard_exit_matrix.png")
             except NotImplementedError:
-                logger.debug("plot_guard_exit_matrix not yet implemented — skipping.")
+                logger.debug("plot_guard_exit_matrix not yet implemented - skipping.")
             except Exception as exc:
                 logger.warning("ge_matrix plot failed: %s", exc)
         else:
             logger.debug(
                 "ge_matrix requires ≥4 scenarios with varying guard/exit fractions "
-                "— skipping (found %d).", len(ge_results)
+                "- skipping (found %d).", len(ge_results)
             )
 
     if len(results) > 1:
         comp = compare_scenarios(scenario_metrics)
         logger.info("Best scenario per metric:")
         for metric, data in comp.get("metrics_comparison", {}).items():
-            best = data.get("best_scenario", "—")
+            best = data.get("best_scenario", "-")
             val  = data.get("values", {}).get(best, "?")
             logger.info(
                 "  %-28s → %-35s %.4f",
@@ -601,7 +601,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for name, entry in ATTACK_REGISTRY.items():
             ap = argparse.ArgumentParser(prog=f"  {name}", add_help=False)
             entry.add_arguments(ap)
-            print(f"{name}  —  {entry.label}")
+            print(f"{name}  -  {entry.label}")
             print("─" * 40)
             ap.print_help()
             print()
@@ -708,7 +708,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     elapsed = time.perf_counter() - t0
     logger.info("─" * 60)
     logger.info(
-        "Analysis complete in %.1f s — %d/%d scenario(s) produced results.",
+        "Analysis complete in %.1f s - %d/%d scenario(s) produced results.",
         elapsed, len(results), len(scenarios),
     )
 

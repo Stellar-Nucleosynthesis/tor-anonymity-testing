@@ -4,10 +4,11 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src.attacks.base_attack import RelayMetadata
 from src.analysis.correlation import TrafficProfile
 from src.analysis.deanonymization import DeanonymizationResult
 from src.analysis.guard_exit import (
@@ -18,6 +19,19 @@ from src.attacks.base_attack import AttackConfig, BaseAttack
 
 
 logger = logging.getLogger("GuardExit")
+
+@dataclass(frozen=True)
+class Circuit:
+    """Information about a Tor circuit
+
+    Attributes:
+        global_id: unique circuit identifier chosen at the circuit origin
+        relays: A tuple of circuit relay hostnames.
+        origin: A tuple of relay origin hostname and circuit id
+    """
+    global_id: str
+    relays: Tuple[str, ...]
+    origin: Tuple[str, str]
 
 @dataclass
 class GuardExitConfig(AttackConfig):
@@ -44,10 +58,6 @@ class GuardExitAttack(BaseAttack):
 
     ATTACK_NAME = "guard_exit_correlation"
 
-    _RE_CIRC_BUILT: re.Pattern = re.compile(
-        r'650 CIRC\s+(?P<cid>\d+)\s+BUILT\s+(?P<path>\S+)'
-    )
-
     def __init__(
             self,
             config: GuardExitConfig,
@@ -72,7 +82,7 @@ class GuardExitAttack(BaseAttack):
 
     def _build_adversary_relay_list(
             self,
-            network_data: Dict[str, Any]
+            network_data: Dict[str, RelayMetadata]
     ) -> Tuple[List[str], List[str], List[str]]:
         """Partition relays by role and select the adversary subset.
 
@@ -100,11 +110,11 @@ class GuardExitAttack(BaseAttack):
 
         guards = [
             name for name, meta in network_data.items()
-            if "Guard" in meta.get("flags", [])
+            if "Guard" in meta.flags
         ]
         exits = [
             name for name, meta in network_data.items()
-            if "Exit" in meta.get("flags", [])
+            if "Exit" in meta.flags
         ]
         middles = [
             name for name, meta in network_data.items()
@@ -201,15 +211,15 @@ class GuardExitAttack(BaseAttack):
             return self._generate_synthetic_results(seed)
 
         client_hostnames = self._resolve_client_filter(sim_dir)
-        ground_truth, path_to_client = self._build_ground_truth(
-            hosts_dir, client_filter=client_hostnames
-        )
+        ground_truth = self._build_ground_truth(hosts_dir)
 
         results = self._correlate_all_pairs(
-            guard_profiles, exit_profiles, ground_truth, path_to_client, seed=seed
+            guard_profiles, exit_profiles,
+            ground_truth,
+            client_filter=client_hostnames, seed=seed
         )
 
-        circuits_for_stats = list(ground_truth.values())
+        circuits_for_stats = [c.relays for c in set(ground_truth.values())]
         if circuits_for_stats:
             stats = compute_circuit_compromise_rate(
                 circuits_for_stats,
@@ -258,7 +268,7 @@ class GuardExitAttack(BaseAttack):
         if manifest is None:
             self.logger.warning(
                 "client_filter=%r set but no custom_clients_manifest.json found "
-                "under %s — filter ignored.",
+                "under %s - filter ignored.",
                 self.ge_config.client_filter, sim_dir,
             )
             return None
@@ -266,7 +276,7 @@ class GuardExitAttack(BaseAttack):
         hostnames = manifest.resolve_filter(self.ge_config.client_filter)
         if hostnames is None:
             self.logger.warning(
-                "client_filter=%r did not match any group in the manifest — "
+                "client_filter=%r did not match any group in the manifest - "
                 "filter ignored.",
                 self.ge_config.client_filter,
             )
@@ -280,28 +290,44 @@ class GuardExitAttack(BaseAttack):
         )
         return set(hostnames)
 
+    _RE_RESEARCH_ID_CHOSEN = re.compile(
+        r'CIRC RESEARCH_ID_CHOSEN LocalCircID=(?P<cid>\d+)'
+        r' ResearchID=(?P<rid>[0-9a-f]+)'
+    )
+    _RE_RESEARCH_ID_UPDATED = re.compile(
+        r'CIRC RESEARCH_ID_UPDATED LocalOrCircID=(?P<cid>\d+)'
+        r' ResearchID=(?P<rid>[0-9a-f]+)'
+    )
+    _RE_CIRC_BUILT: re.Pattern = re.compile(
+        r'650 CIRC\s+(?P<cid>\d+)\s+BUILT\s+(?P<path>\S+)'
+    )
+
     def _build_ground_truth(
             self,
             hosts_dir: Path,
-            client_filter: Optional[set] = None,
-    ) -> Tuple[Dict[str, Dict[str, str]], Dict[Tuple[str, str, str], str]]:
-        """Build ground truth and a path-to-client mapping from OnionTrace logs.
+    ) -> Dict[Tuple[str, str], Circuit]:
+        """Build ground truth from OnionTrace logs using research IDs.
 
-        Iterates every OnionTrace log under ``hosts_dir`` and extracts
-        ``CIRC BUILT`` events.
+        Two-pass algorithm:
+
+        Pass 1 - client logs only:
+            For each torclient* host, correlate RESEARCH_ID_CHOSEN events
+            (which map a local circuit ID to a global research_id) with
+            CIRC BUILT events (which map a local circuit ID to a relay path).
+            Produces a mapping of research_id -> Circuit.
+
+        Pass 2 - relay logs only:
+            For each relay host, parse RESEARCH_ID_UPDATED events which map
+            the relay's local circuit ID to a research_id. Look up the
+            Circuit from Pass 1 and register the key
+            (relay_hostname, local_cid) -> Circuit in ground_truth.
 
         Returns:
-            A tuple of:
-            - ``ground_truth``: mapping ``"hostname/local_cid"`` to
-              ``{"guard", "middle", "exit"}`` relay hostnames.
-            - ``path_to_client``: mapping ``(guard, middle, exit)`` to the
-              torclient hostname that built that path.  Used to tag
-              ``DeanonymizationResult.client_id`` with the originating client
-              so that results can be split by group in the analysis step.
-              First-seen semantics when multiple clients use the same path.
+            A mapping of (hostname, local_cid) to Circuit, covering every
+            relay hop that received a research_id for a general-purpose
+            client circuit.
         """
-        ground_truth: Dict[str, Dict[str, str]] = {}
-        path_to_client: Dict[Tuple[str, str, str], str] = {}
+        research_id_to_circuit: Dict[str, Circuit] = {}
 
         for host_dir in sorted(hosts_dir.iterdir()):
             if not host_dir.is_dir():
@@ -312,61 +338,80 @@ class GuardExitAttack(BaseAttack):
 
             hostname = host_dir.name
 
-            is_client = not any(
-                hostname.startswith(pfx)
-                for pfx in ("relayguard", "relayexit", "relay")
-            )
-            if client_filter is not None and is_client and hostname not in client_filter:
+            cid_to_rid: Dict[str, str] = {}
+            cid_to_relays: Dict[str, Tuple[str, ...]] = {}
+
+            try:
+                with log_path.open(errors="replace") as fh:
+                    for line in fh:
+                        m = self._RE_RESEARCH_ID_CHOSEN.search(line)
+                        if m:
+                            cid_to_rid[m.group("cid")] = m.group("rid")
+                            continue
+                        m = self._RE_CIRC_BUILT.search(line)
+                        if m:
+                            relays = self._parse_circ_path(m.group("path"))
+                            if relays is not None:
+                                cid_to_relays[m.group("cid")] = relays
+            except OSError as exc:
+                self.logger.warning("Could not read %s: %s", log_path, exc)
                 continue
-            for local_cid, path_str in self._iter_circ_built(log_path):
-                key = f"{hostname}/{local_cid}"
-                if key in ground_truth:
+
+            for cid, rid in cid_to_rid.items():
+                relays = cid_to_relays.get(cid)
+                if relays is None:
                     continue
-                parsed = self._parse_circ_path(path_str)
-                if parsed is not None:
-                    guard_name, middle_name, exit_name = parsed
-                    ground_truth[key] = {
-                        "guard":  guard_name,
-                        "middle": middle_name,
-                        "exit":   exit_name,
-                    }
-                    if hostname.startswith("torclient"):
-                        path_key = (guard_name, middle_name, exit_name)
-                        if path_key not in path_to_client:
-                            path_to_client[path_key] = hostname
+                if rid in research_id_to_circuit:
+                    continue
+                research_id_to_circuit[rid] = Circuit(
+                    global_id=rid,
+                    relays=relays,
+                    origin=(hostname, cid),
+                )
 
-        self.logger.debug(
-            "Built ground truth for %d (hostname, cid) entries; "
-            "%d path-client mappings from %s.",
-            len(ground_truth), len(path_to_client), hosts_dir,
+        self.logger.info(
+            "Pass 1: built %d circuits from client logs.", len(research_id_to_circuit)
         )
-        return ground_truth, path_to_client
 
-    def _iter_circ_built(self, log_path: Path) -> Iterator[Tuple[str, str]]:
-        """Yield ``(local_circuit_id, path_string)`` for every ``CIRC BUILT`` event.
+        ground_truth: Dict[Tuple[str, str], Circuit] = {}
 
-        Iterates the log line-by-line without loading it into memory.
+        for host_dir in sorted(hosts_dir.iterdir()):
+            if not host_dir.is_dir():
+                continue
+            if host_dir.name.startswith("torclient"):
+                continue
+            log_path = self._find_relay_oniontrace_log(host_dir)
+            if log_path is None:
+                continue
 
-        Args:
-            log_path: Path to a single OnionTrace log file.
+            hostname = host_dir.name
 
-        Yields:
-            Tuples of ``(local_cid, path_str)`` where ``local_cid`` is the
-            Tor-process-local circuit ID string and ``path_str`` is the raw
-            ``$FP~nickname,...`` path field from the event.
-        """
-        try:
-            with log_path.open(errors="replace") as fh:
-                for line in fh:
-                    m = self._RE_CIRC_BUILT.search(line)
-                    if m:
-                        yield m.group("cid"), m.group("path")
-        except OSError as exc:
-            self.logger.warning("Could not read %s: %s", log_path, exc)
+            try:
+                with log_path.open(errors="replace") as fh:
+                    for line in fh:
+                        m = self._RE_RESEARCH_ID_UPDATED.search(line)
+                        if not m:
+                            continue
+                        cid = m.group("cid")
+                        rid = m.group("rid")
+                        circuit = research_id_to_circuit.get(rid)
+                        if circuit is None:
+                            continue
+                        key = (hostname, cid)
+                        if key not in ground_truth:
+                            ground_truth[key] = circuit
+            except OSError as exc:
+                self.logger.warning("Could not read %s: %s", log_path, exc)
+
+        self.logger.info(
+            "Pass 2: registered %d (relay, local_cid) -> Circuit entries.",
+            len(ground_truth),
+        )
+        return ground_truth
 
     @staticmethod
-    def _parse_circ_path(path_str: str,) -> Optional[Tuple[str, str, str]]:
-        """Parse a ``CIRC BUILT`` path string into a relay ID tuple.
+    def _parse_circ_path(path_str: str,) -> Optional[Tuple[str, ...]]:
+        """Parse a ``CIRC BUILT`` path string into a relay hostname tuple.
 
         The path field has the form::
 
@@ -376,15 +421,14 @@ class GuardExitAttack(BaseAttack):
             path_str: The raw path field from a ``CIRC BUILT`` log line.
 
         Returns:
-            A tuple of ``(guard_name, middle_name, exit_name)`` uppercase hex
-            strings, or ``None`` when the path does not contain exactly three
-            hops (e.g. two-hop directory circuits or malformed lines).
+            A tuple of ``(guard_name, middle_name_1, ..., exit_name)``,
+            or ``None`` when the path contains less than 2 hops.
         """
         hops = path_str.split(",")
-        if len(hops) != 3:
+        if len(hops) < 2:
             return None
         hostnames = [hop.split("~")[1].strip() for hop in hops]
-        return hostnames[0], hostnames[1], hostnames[2]
+        return tuple(hostnames)
 
     _BW_RATIO_MAX: float = 3.0
 
@@ -417,14 +461,14 @@ class GuardExitAttack(BaseAttack):
         Two cheap filters are applied in sequence so that
         ``CorrelationAnalyzer`` is only called on survivors:
 
-        **Filter 1 — temporal overlap** (O(log N))
+        **Filter 1 - temporal overlap** (O(log N))
             Guard and exit observe the same circuit within a propagation delay
             bounded by ``ge_config.max_time_lag``.  Exit profiles whose
             ``first_packet_time`` lies entirely outside the window
             ``[guard_start − max_lag, guard_end + max_lag]`` are discarded via
             ``bisect`` without inspecting individual entries.
 
-        **Filter 2 — byte-count ratio** (O(k) on time-filter survivors)
+        **Filter 2 - byte-count ratio** (O(k) on time-filter survivors)
             Guard and exit carry the same application payload ±
             ``_BW_RATIO_MAX`` for Tor cell overhead.  Exit profiles whose
             ``total_bytes`` fall outside that band are discarded.
@@ -462,28 +506,26 @@ class GuardExitAttack(BaseAttack):
             self,
             guard_profiles: List[TrafficProfile],
             exit_profiles: List[TrafficProfile],
-            ground_truth: Dict[str, Dict[str, str]],
-            path_to_client: Dict[Tuple[str, str, str], str],
+            ground_truth: Dict[Tuple[str, str], Circuit],
+            client_filter: Optional[set],
             seed: int,
     ) -> List[DeanonymizationResult]:
         """Cross-correlate guard-exit profile pairs.
 
         Guard and exit ``circuit_id`` values are ``"hostname/local_cid"``
         strings that are never directly comparable across relays.  Success is
-        declared when both profiles resolve to the same canonical
-        ``(guard_fp, middle_fp, exit_fp)`` triple via ``ground_truth``.
+        declared when both profiles resolve to the same hostname
+        list via ``ground_truth``.
 
         Args:
             guard_profiles: Traffic profiles observed at adversary guard relays,
                 as returned by ``_load_profiles_from_oniontrace``.
             exit_profiles: Traffic profiles observed at adversary exit relays,
                 as returned by ``_load_profiles_from_oniontrace``.
-            ground_truth: Mapping of ``"hostname/local_cid"`` to relay
-                hostname dicts, as returned by ``_build_ground_truth``.
-            path_to_client: mapping (built by ``_build_ground_truth``)
-                used to embed the originating torclient hostname in each result's
-                ``client_id`` field as
-                ``"client_seed{N}_{client_hostname}__{guard_host}/{local_cid}"``.
+            ground_truth: Mapping of ``"hostname/local_cid"`` to ``Circuit`` objects,
+                as returned by ``_build_ground_truth``.
+            client_filter: The list of client hostnames for which to
+                return deanonymization results.
             seed: Seed index embedded in ``DeanonymizationResult.client_id``
                 for traceability.
 
@@ -497,43 +539,54 @@ class GuardExitAttack(BaseAttack):
 
         total_candidates = 0
 
+        print("=" * 70)
+        for key, val in ground_truth.items():
+            print(key, val)
+        print("=" * 70)
+
         falsely_filtered = 0
         falsely_evaluated = 0
         for g_prof in guard_profiles:
             t_start = time.perf_counter()
-            g_canon = ground_truth.get(g_prof.circuit_id)
-            true_guard = (g_canon or {}).get("guard", "unknown")
-            true_exit = (g_canon or {}).get("exit", "unknown")
+            circ_key = (g_prof.hostname, g_prof.circuit_id)
+            circuit = ground_truth.get(circ_key, None)
 
-            client_hostname = "unknown"
-            if g_canon:
-                path_key = (g_canon["guard"], g_canon["middle"], g_canon["exit"])
-                client_hostname = path_to_client.get(path_key, "unknown")
+            if circuit is None:
+                self.logger.debug(
+                    f"Skipping circuit {circ_key}: client circuit "
+                    f"could not be determined with local circuit id"
+                )
+                continue
+
+            origin_hostname, origin_cid = circuit.origin
+            if client_filter and origin_hostname not in client_filter:
+                continue
 
             candidates = self._candidates_for_guard(g_prof, sorted_exits, exit_starts)
             total_candidates += len(candidates)
 
             falsely_discarded_real = False
-            if true_exit not in [(ground_truth.get(c.circuit_id) or {}).get("exit", "unknown") for c in candidates]:
+            cand_circuits = [ground_truth.get((c.hostname, c.circuit_id), None)
+                                    for c in candidates]
+            cand_global_ids = [c.global_id for c in cand_circuits if c is not None]
+            if circuit.global_id not in cand_global_ids:
                 falsely_discarded_real = True
                 falsely_filtered += 1
-
-            if not candidates:
-                continue
 
             candidate_scores: List[Tuple[str, float]] = []
             for e_prof in candidates:
                 score, matches = self._correlate_and_decide(g_prof, e_prof)
-                if matches:
-                    candidate_scores.append((e_prof.circuit_id, score))
+                prof_circ = ground_truth.get(
+                    (e_prof.hostname, e_prof.circuit_id), None)
+                if matches and prof_circ is not None:
+                    candidate_scores.append((prof_circ.global_id, score))
 
             if not candidate_scores:
                 results.append(
                     DeanonymizationResult(
-                        client_id=f"client_seed{seed}_{client_hostname}__{g_prof.circuit_id}",
-                        circuit_id=g_prof.circuit_id,
-                        true_guard=true_guard,
-                        true_exit=true_exit,
+                        seed=str(seed),
+                        origin_id=origin_hostname,
+                        circuit_id=origin_cid,
                         attempted=False,
                         successful=False,
                     )
@@ -541,33 +594,18 @@ class GuardExitAttack(BaseAttack):
                 continue
 
             candidate_scores.sort(key=lambda x: x[1], reverse=True)
-            best_cid, best_score = candidate_scores[0]
-
-            best_canon = ground_truth.get(best_cid)
-            successful = (
-                    g_canon is not None
-                    and best_canon is not None
-                    and g_canon == best_canon
-            )
-
+            best_glob_id, best_score = candidate_scores[0]
+            successful = best_glob_id == circuit.global_id
             if not successful and not falsely_discarded_real:
                 falsely_evaluated += 1
-
-            predicted_exit_name = (
-                best_canon.get("exit")
-                if successful else None
-            )
 
             confidence = 1 / (1 + math.exp(-best_score))
 
             results.append(
                 DeanonymizationResult(
-                    client_id=f"client_seed{seed}_{client_hostname}__{g_prof.circuit_id}",
+                    seed=str(seed),
+                    origin_id=origin_hostname,
                     circuit_id=g_prof.circuit_id,
-                    true_guard=true_guard,
-                    true_exit=true_exit,
-                    predicted_guard=true_guard if g_canon else None,
-                    predicted_exit=predicted_exit_name,
                     confidence=confidence,
                     correlation_score=best_score,
                     time_to_identify=time.perf_counter() - t_start,
@@ -579,9 +617,9 @@ class GuardExitAttack(BaseAttack):
         self.logger.debug(
             "Correlated %d guard profile(s) against %d exit profile(s): "
             "%d pair(s) evaluated (%.1f avg/guard; brute-force would be %d).",
-            len(guard_profiles), len(exit_profiles),
+            len(results), len(exit_profiles),
             total_candidates, total_candidates / max(len(guard_profiles), 1),
-            len(guard_profiles) * len(exit_profiles),
+            len(exit_profiles),
         )
         self.logger.debug(
             f"Falsely discarded true exits for {falsely_filtered} guard profile(s) "
@@ -640,16 +678,9 @@ class GuardExitAttack(BaseAttack):
 
             results.append(
                 DeanonymizationResult(
-                    client_id=f"synthetic_seed{seed}_client{i}",
+                    seed=str(seed),
+                    origin_id=f"synthetic_seed{seed}_client{i}",
                     circuit_id=f"circ_{seed}_{i}",
-                    true_guard=f"guard_{rng.integers(0, 100):03d}",
-                    true_exit=f"exit_{rng.integers(0, 100):03d}",
-                    predicted_guard=(
-                        f"guard_{rng.integers(0, 100):03d}" if successful else None
-                    ),
-                    predicted_exit=(
-                        f"exit_{rng.integers(0, 100):03d}" if successful else None
-                    ),
                     confidence=float(np.clip(score + rng.normal(0, 0.05), 0, 1)),
                     correlation_score=score,
                     time_to_identify=float(rng.exponential(0.5)),

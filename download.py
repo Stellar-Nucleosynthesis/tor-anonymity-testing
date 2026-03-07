@@ -1,4 +1,4 @@
-"""Step 1 — Download Tor relay data from CollecTor and Tor Metrics.
+"""Step 1 - Download Tor relay data from CollecTor and Tor Metrics.
 
 Downloads consensus snapshots, server descriptors, user statistics,
 OnionPerf data, and the bandwidth CSV for the chosen month, then
@@ -32,7 +32,7 @@ from src.fetching import prepare_tor_data as ptd
 def _configure_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
-        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        format="%(asctime)s  %(levelname)-8s  %(name)s - %(message)s",
         datefmt="%H:%M:%S",
     )
 
@@ -132,27 +132,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             log.info("  already present: %s", dest.name)
         else:
             if not ptd.download_file(url, dest, log):
-                log.error("Download failed (%s) — aborting.", filename)
+                log.error("Download failed (%s) - aborting.", filename)
                 return 1
 
         if do_extract:
             extracted = output_dir / dest.name.replace(".tar.xz", "")
             if not extracted.exists():
                 if not ptd.extract_archive(dest, output_dir, log):
-                    log.error("Extraction failed (%s) — aborting.", filename)
+                    log.error("Extraction failed (%s) - aborting.", filename)
                     return 1
             else:
                 log.info("  already extracted: %s", extracted.name)
 
     log.info("Step 2/3: Cloning TModel traffic model...")
     if not ptd.clone_tmodel(output_dir, log):
-        log.error("TModel clone failed — aborting.")
+        log.error("TModel clone failed - aborting.")
         return 1
 
     if not args.skip_tor_build:
         log.info("Step 3/3: Building Tor from source (may take several minutes)...")
         if not ptd.clone_tor_source(output_dir, log):
-            log.error("Tor build failed — aborting.")
+            log.error("Tor build failed - aborting.")
             return 1
     else:
         log.info("Step 3/3: Skipping Tor build (--skip-tor-build).")

@@ -83,7 +83,7 @@ def plot_seed_variance_box(
         scenario_per_seed: Mapping of scenario label → list of per-seed metric
             dicts (one dict per seed run).
         metric: The metric key to plot on the y-axis.
-        title: Figure title.  Defaults to ``"Seed Variance — {metric}"``.
+        title: Figure title.  Defaults to ``"Seed Variance - {metric}"``.
         save_path: Optional save path.
 
     Returns:
@@ -130,7 +130,7 @@ def plot_accuracy_coverage(
     Plots ``conditional_accuracy`` on the primary y-axis and ``coverage`` on
     a secondary y-axis, both as functions of the decision threshold.  A
     vertical dashed line marks the threshold at which the product
-    (accuracy × coverage) is maximized — a simple operating-point heuristic.
+    (accuracy × coverage) is maximized - a simple operating-point heuristic.
 
     Args:
         sweep: Output of ``compute_threshold_sweep`` for one scenario.
@@ -195,7 +195,7 @@ def plot_timing_distribution(
 
 def plot_accuracy_coverage_multi(
     sweeps: Dict[str, ThresholdSweep],
-    title: str = "Accuracy / Coverage — Multiple Seeds",
+    title: str = "Accuracy / Coverage - Multiple Seeds",
     save_path: Optional[Path] = None,
 ) -> plt.Figure:
     """Overlaid accuracy/coverage curves for multiple seeds or scenarios.
@@ -245,7 +245,7 @@ def plot_guard_exit_matrix(
     exit_fractions: List[float],
     success_rate_matrix: np.ndarray,
     metric_label: str = "Success Rate",
-    title: str = "Guard × Exit Fraction — Success Rate",
+    title: str = "Guard × Exit Fraction - Success Rate",
     save_path: Optional[Path] = None,
 ) -> plt.Figure:
     """Heatmap of success rate as a function of guard and exit adversary fractions.

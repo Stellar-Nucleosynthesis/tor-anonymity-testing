@@ -1,4 +1,5 @@
-from typing import Dict, List
+from typing import Dict, List, Tuple
+
 
 def compute_guard_exit_deanon_probability(
         guard_fraction: float,
@@ -23,7 +24,7 @@ def compute_guard_exit_deanon_probability(
 
 
 def compute_circuit_compromise_rate(
-        circuits: List[Dict],
+        circuits: List[Tuple[str, ...]],
         adversary_guards: List[str],
         adversary_exits: List[str]
 ) -> Dict[str, float]:
@@ -44,8 +45,8 @@ def compute_circuit_compromise_rate(
     both_compromised = 0
 
     for circuit in circuits:
-        guard_comp = circuit.get('guard') in adversary_guards
-        exit_comp = circuit.get('exit') in adversary_exits
+        guard_comp = circuit[0] in adversary_guards
+        exit_comp = circuit[-1] in adversary_exits
 
         if guard_comp:
             guard_compromised += 1
