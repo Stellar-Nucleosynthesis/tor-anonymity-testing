@@ -27,6 +27,7 @@ class DeanonymizationResult:
         time_to_identify: Wall-clock seconds spent on this circuit.
     """
     seed: str
+    group: Optional[str]
     origin_id: str
     circuit_id: str
     attempted: bool

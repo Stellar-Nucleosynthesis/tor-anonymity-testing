@@ -720,31 +720,6 @@ class BaseAttack(abc.ABC):
             return None
         return Path(files[0])
 
-    @staticmethod
-    def _b64_fingerprint_to_hex(b64: str) -> str:
-        """Convert a base64-encoded relay fingerprint to an uppercase hex string.
-
-        Tor consensus ``r`` lines encode the 20-byte identity fingerprint in
-        base64 without padding. This method re-adds the padding before
-        decoding and returns the standard 40-character hex representation.
-
-        Args:
-            b64: Base64 fingerprint string as it appears in the ``r`` line of
-                a consensus file (no ``=`` padding, typically 27 characters).
-
-        Returns:
-            A 40-character uppercase hex string, e.g.
-            ``"AABBCCDDEEFF00112233445566778899AABBCCDD"``.
-            Returns the original string unchanged if decoding fails.
-        """
-        try:
-            pad = (4 - len(b64) % 4) % 4
-            return binascii.hexlify(
-                base64.b64decode(b64 + "=" * pad)
-            ).upper().decode()
-        except Exception:
-            return b64
-
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}("

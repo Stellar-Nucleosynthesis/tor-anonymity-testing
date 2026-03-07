@@ -50,7 +50,6 @@ Usage
 import argparse
 import json
 import logging
-import re
 import sys
 import time
 from dataclasses import dataclass
@@ -60,6 +59,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
+from src.analysis.deanonymization import DeanonymizationResult
 from src.analysis.metrics import compare_scenarios, compute_seed_variance
 from src.analysis.deanonymization import evaluate_attack
 from src.visualization import plots as vplots
@@ -724,8 +724,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 def _split_results_by_group(
-    all_results: List[Any],
-) -> Dict[str, List[Any]]:
+    all_results: List[DeanonymizationResult],
+) -> Dict[str, List[DeanonymizationResult]]:
     """Split DeanonymizationResult objects by the group encoded in client_id.
 
     The group is embedded by GuardExitAttack._correlate_all_pairs as
@@ -740,30 +740,24 @@ def _split_results_by_group(
     """
     groups: Dict[str, List[Any]] = {}
     for r in all_results:
-        m = re.search(r"_grp:(\w+)_", r.client_id)
-        group = m.group(1) if m else "general"
+        group = r.group if r.group else "general"
         groups.setdefault(group, []).append(r)
     return groups
 
 
 def _group_by_seed(
-    all_results: List[Any]
-) -> List[Tuple[Optional[int], List[Any]]]:
+    all_results: List[DeanonymizationResult]
+) -> List[Tuple[Optional[int], List[DeanonymizationResult]]]:
     """Best-effort split of aggregated results back into per-seed groups.
 
-    Uses the ``client_id`` prefix ``"client_seed{N}_"`` inserted by
-    ``GuardExitAttack``.  Returns a list of ``(total_observed, results_for_seed)``
-    pairs; ``total_observed`` is ``None`` when it cannot be inferred.
+    Arg:
+        all_results: Flat list of DeanonymizationResult objects.
     """
-    import re
-    groups: Dict[int, List[Any]] = {}
+    groups: Dict[int, List[DeanonymizationResult]] = {}
     for r in all_results:
-        m = re.match(r"(?:client_seed|synthetic_seed)(\d+)_", r.client_id)
-        if m:
-            groups.setdefault(int(m.group(1)), []).append(r)
-        else:
-            groups.setdefault(0, []).append(r)
-    return [(None, v) for v in groups.values()]
+        seed = int(r.seed)
+        groups.setdefault(seed, []).append(r)
+    return [(seed, results) for seed, results in groups.items()]
 
 
 def _register_attacks() -> None:

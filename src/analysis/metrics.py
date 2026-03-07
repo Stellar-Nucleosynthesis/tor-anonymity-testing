@@ -117,6 +117,8 @@ def compute_threshold_sweep(
 
     n_total = len(results)
     results = [r for r in results if r.attempted]
+    if not results:
+        return []
     scores  = np.array([r.correlation_score for r in results])
 
     if threshold_range is not None:

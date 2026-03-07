@@ -216,7 +216,8 @@ class GuardExitAttack(BaseAttack):
         results = self._correlate_all_pairs(
             guard_profiles, exit_profiles,
             ground_truth,
-            client_filter=client_hostnames, seed=seed
+            client_filter=client_hostnames,
+            seed=seed
         )
 
         circuits_for_stats = [c.relays for c in set(ground_truth.values())]
@@ -241,8 +242,9 @@ class GuardExitAttack(BaseAttack):
 
         return results
 
-    def _resolve_client_filter(self, sim_dir: Path) -> Optional[set]:
-        """Return the set of allowed client hostnames for this seed, or ``None``.
+    def _resolve_client_filter(self, sim_dir: Path) -> Optional[Dict[str, str | None]]:
+        """Return the mapping of allowed client hostnames to the  groups they
+        belong to for this seed, or ``None``.
 
         Loads ``custom_clients_manifest.json`` from the network directory
         (produced by ``inject_custom_clients``) and resolves
@@ -253,8 +255,8 @@ class GuardExitAttack(BaseAttack):
             sim_dir: Root seed directory (``runs/seed_N/``).
 
         Returns:
-            A ``set`` of Shadow hostnames to include, or ``None`` for no
-            filtering.
+            A ``dict`` with keys as Shadow hostnames to include and values as group names,
+            or ``None`` for no filtering.
         """
         if not self.ge_config.client_filter:
             return None
@@ -286,9 +288,9 @@ class GuardExitAttack(BaseAttack):
             "client_filter=%r → %d host(s): %s",
             self.ge_config.client_filter,
             len(hostnames),
-            hostnames if len(hostnames) <= 6 else hostnames[:6] + ["..."],
+            hostnames if len(hostnames) <= 6 else list(hostnames.keys())[:6] + ["..."],
         )
-        return set(hostnames)
+        return hostnames
 
     _RE_RESEARCH_ID_CHOSEN = re.compile(
         r'CIRC RESEARCH_ID_CHOSEN LocalCircID=(?P<cid>\d+)'
@@ -370,7 +372,7 @@ class GuardExitAttack(BaseAttack):
                 )
 
         self.logger.info(
-            "Pass 1: built %d circuits from client logs.", len(research_id_to_circuit)
+            "Pass 1: found %d local circuits in client logs.", len(research_id_to_circuit)
         )
 
         ground_truth: Dict[Tuple[str, str], Circuit] = {}
@@ -500,14 +502,14 @@ class GuardExitAttack(BaseAttack):
         g_bytes = max(g_prof.total_bytes, 1)
         lo_bytes = g_bytes / self._BW_RATIO_MAX
         hi_bytes = g_bytes * self._BW_RATIO_MAX
-        return [e for e in time_candidates if lo_bytes <= e.total_bytes <= hi_bytes]
+        return [e for e in time_candidates if lo_bytes <= e.total_bytes <= hi_bytes and e != g_prof]
 
     def _correlate_all_pairs(
             self,
             guard_profiles: List[TrafficProfile],
             exit_profiles: List[TrafficProfile],
             ground_truth: Dict[Tuple[str, str], Circuit],
-            client_filter: Optional[set],
+            client_filter: Optional[Dict[str, str | None]],
             seed: int,
     ) -> List[DeanonymizationResult]:
         """Cross-correlate guard-exit profile pairs.
@@ -535,32 +537,32 @@ class GuardExitAttack(BaseAttack):
         """
         results: List[DeanonymizationResult] = []
 
-        sorted_exits, exit_starts = self._build_exit_index(exit_profiles)
+        filtered_g_profs = self._filter_traffic_profiles(
+            guard_profiles, ground_truth, client_filter
+        )
+        filtered_e_profs = self._filter_traffic_profiles(
+            exit_profiles, ground_truth, client_filter
+        )
 
+        self.logger.info(
+            f"Left after filtering: {len(filtered_g_profs)} guard profiles "
+            f"({len(filtered_g_profs)/len(guard_profiles):.2%})"
+        )
+        self.logger.info(
+            f"Left after filtering: {len(filtered_e_profs)} exit profiles "
+            f"({len(filtered_e_profs) / len(exit_profiles):.2%})"
+        )
+
+        sorted_exits, exit_starts = self._build_exit_index(filtered_e_profs)
         total_candidates = 0
-
-        print("=" * 70)
-        for key, val in ground_truth.items():
-            print(key, val)
-        print("=" * 70)
-
         falsely_filtered = 0
         falsely_evaluated = 0
-        for g_prof in guard_profiles:
+        for g_prof in filtered_g_profs:
             t_start = time.perf_counter()
-            circ_key = (g_prof.hostname, g_prof.circuit_id)
-            circuit = ground_truth.get(circ_key, None)
-
-            if circuit is None:
-                self.logger.debug(
-                    f"Skipping circuit {circ_key}: client circuit "
-                    f"could not be determined with local circuit id"
-                )
-                continue
+            circuit = ground_truth[(g_prof.hostname, g_prof.circuit_id)]
 
             origin_hostname, origin_cid = circuit.origin
-            if client_filter and origin_hostname not in client_filter:
-                continue
+            group_name = client_filter[origin_hostname] if client_filter else None
 
             candidates = self._candidates_for_guard(g_prof, sorted_exits, exit_starts)
             total_candidates += len(candidates)
@@ -585,6 +587,7 @@ class GuardExitAttack(BaseAttack):
                 results.append(
                     DeanonymizationResult(
                         seed=str(seed),
+                        group=group_name,
                         origin_id=origin_hostname,
                         circuit_id=origin_cid,
                         attempted=False,
@@ -604,6 +607,7 @@ class GuardExitAttack(BaseAttack):
             results.append(
                 DeanonymizationResult(
                     seed=str(seed),
+                    group=group_name,
                     origin_id=origin_hostname,
                     circuit_id=g_prof.circuit_id,
                     confidence=confidence,
@@ -617,19 +621,49 @@ class GuardExitAttack(BaseAttack):
         self.logger.debug(
             "Correlated %d guard profile(s) against %d exit profile(s): "
             "%d pair(s) evaluated (%.1f avg/guard; brute-force would be %d).",
-            len(results), len(exit_profiles),
-            total_candidates, total_candidates / max(len(guard_profiles), 1),
-            len(exit_profiles),
+            len(results), len(filtered_e_profs),
+            total_candidates, total_candidates / max(len(filtered_g_profs), 1),
+            len(filtered_e_profs),
         )
         self.logger.debug(
             f"Falsely discarded true exits for {falsely_filtered} guard profile(s) "
-            f"({falsely_filtered/len(guard_profiles):.2%}) during filtering"
+            f"({falsely_filtered/len(filtered_g_profs):.2%}) during filtering"
         )
         self.logger.debug(
             f"Falsely discarded true exits for {falsely_evaluated} guard profile(s) "
-            f"({falsely_evaluated / len(guard_profiles):.2%}) during evaluation"
+            f"({falsely_evaluated / len(filtered_g_profs):.2%}) during evaluation"
         )
         return results
+
+
+    @staticmethod
+    def _filter_traffic_profiles(
+            profiles: List[TrafficProfile],
+            ground_truth: Dict[Tuple[str, str], Circuit],
+            client_filter: Optional[Dict[str, str | None]],
+    ) -> List[TrafficProfile]:
+        """Filter traffic profiles to eliminate profiles with no registered circuit and
+        include only the profiles with specified origins
+
+        Args:
+            profiles: A list of traffic profiles to filter.
+            ground_truth: Mapping of local OR circuits to global client circuits.
+            client_filter:  An optional list of origin hostnames.
+        Yields:
+            A generator of filtered ``TrafficProfile`` objects.
+        """
+        res = list()
+        for profile in profiles:
+            key = (profile.hostname, profile.circuit_id)
+            circ = ground_truth.get(key, None)
+            if circ is None:
+                continue
+            hostname, _ = circ.origin
+            if client_filter is not None and hostname not in client_filter:
+                continue
+            res.append(profile)
+        return res
+
 
 
     def _generate_synthetic_results(self, seed: int) -> List[DeanonymizationResult]:
@@ -679,6 +713,7 @@ class GuardExitAttack(BaseAttack):
             results.append(
                 DeanonymizationResult(
                     seed=str(seed),
+                    group="general",
                     origin_id=f"synthetic_seed{seed}_client{i}",
                     circuit_id=f"circ_{seed}_{i}",
                     confidence=float(np.clip(score + rng.normal(0, 0.05), 0, 1)),

@@ -152,8 +152,8 @@ class CustomClientsManifest:
         data = json.loads(path.read_text())
         return cls(**data)
 
-    def resolve_filter(self, filter_spec: str) -> Optional[List[str]]:
-        """Resolve a filter spec to a list of hostnames.
+    def resolve_filter(self, filter_spec: str) -> Optional[Dict[str, str | None]]:
+        """Resolve a filter spec to a mapping of client names to group names.
 
         Supported formats:
           ``group:probe``                    - all hosts in the named group.
@@ -163,9 +163,9 @@ class CustomClientsManifest:
         """
         if filter_spec.startswith("group:"):
             name = filter_spec[len("group:"):]
-            return self.groups.get(name)
+            return {n: name for n in self.groups.get(name)}
         if filter_spec.startswith("host:"):
-            return [h.strip() for h in filter_spec[len("host:"):].split(",")]
+            return {h.strip(): None for h in filter_spec[len("host:"):].split(",")}
         return None
 
 
