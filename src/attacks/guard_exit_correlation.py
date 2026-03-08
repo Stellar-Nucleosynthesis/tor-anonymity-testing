@@ -52,8 +52,6 @@ class GuardExitAttack(BaseAttack):
             filenames and reports.
         ge_config: Typed reference to the ``GuardExitConfig`` passed at
             construction.
-        synthetic: When ``True``, synthetic results are generated when no
-            Shadow host directory is found instead of skipping the seed.
     """
 
     ATTACK_NAME = "guard_exit_correlation"
@@ -61,8 +59,7 @@ class GuardExitAttack(BaseAttack):
     def __init__(
             self,
             config: GuardExitConfig,
-            workspace: Optional[Path] = None,
-            synthetic: bool = False,
+            workspace: Optional[Path] = None
     ):
         """Initialize the attack.
 
@@ -70,12 +67,9 @@ class GuardExitAttack(BaseAttack):
             config: Guard+Exit-specific scenario configuration.
             workspace: Root directory for intermediate files. Defaults to
                 ``./workspace``.
-            synthetic: When ``True``, missing Shadow host directories trigger
-                synthetic result generation instead of an empty return.
         """
         super().__init__(config, workspace)
         self.ge_config: GuardExitConfig = config
-        self.synthetic = synthetic
 
         self._adversary_guards: List[str] = []
         self._adversary_exits: List[str] = []
@@ -154,9 +148,7 @@ class GuardExitAttack(BaseAttack):
                             ...
 
         The method:
-            1. Locates ``shadow.data/hosts/`` under ``sim_dir`` (falls back to
-               synthetic data if ``self.synthetic`` is ``True`` and no
-               directory is found).
+            1. Locates ``shadow.data/hosts/`` under ``sim_dir``.
             2. Ensures adversary relay lists are populated, auto-discovering
                a consensus directory if needed.
             3. Extracts guard and exit ``TrafficProfile`` objects from
@@ -173,15 +165,12 @@ class GuardExitAttack(BaseAttack):
 
         Returns:
             A list of ``DeanonymizationResult`` objects, one per guard profile
-            processed. Returns synthetic results when ``self.synthetic`` is
-            ``True`` and no Shadow host directory is found.
+            processed.
         """
         self.logger.info("Analyzing seed=%d  dir=%s", seed, sim_dir)
 
         hosts_dir = self._find_shadow_data_hosts(sim_dir)
         if hosts_dir is None:
-            if self.synthetic:
-                return self._generate_synthetic_results(seed)
             self.logger.warning(
                 "No shadow.data/hosts directory found in %s - skipping seed.", sim_dir,
             )
@@ -208,7 +197,7 @@ class GuardExitAttack(BaseAttack):
                 len(guard_profiles),
                 len(exit_profiles),
             )
-            return self._generate_synthetic_results(seed)
+            return []
 
         client_hostnames = self._resolve_client_filter(sim_dir)
         ground_truth = self._build_ground_truth(hosts_dir)
@@ -664,67 +653,6 @@ class GuardExitAttack(BaseAttack):
             res.append(profile)
         return res
 
-
-
-    def _generate_synthetic_results(self, seed: int) -> List[DeanonymizationResult]:
-        """Generate synthetic deanonymization results for demo and unit testing.
-
-        Produces 200 circuits per seed using score distributions calibrated to
-        the configured adversary fractions so that ROC/AUC plots remain
-        meaningful even without real simulation logs.
-
-        Compromised circuits (guard and exit both adversary-controlled) receive
-        scores drawn from N(0.82, 0.08); uncompromised circuits receive scores
-        from N(0.35, 0.15). Both distributions are clipped to [0, 1].
-
-        Args:
-            seed: Seed index used to seed the NumPy RNG, ensuring different
-                seeds produce different but reproducible results.
-
-        Returns:
-            A list of 200 synthetic ``DeanonymizationResult`` objects.
-        """
-        self.logger.info(
-            "Seed=%d: generating synthetic Guard+Exit results "
-            "(guard_frac=%.2f, exit_frac=%.2f)",
-            seed,
-            self.config.adversary_guard_fraction,
-            self.config.adversary_exit_fraction,
-        )
-        rng = np.random.default_rng(seed=seed + 1000)
-        n_circuits = 200
-        results: List[DeanonymizationResult] = []
-
-        p_compromise = (
-            self.config.adversary_guard_fraction
-            * self.config.adversary_exit_fraction
-        )
-
-        for i in range(n_circuits):
-            is_compromised = rng.random() < p_compromise
-            if is_compromised:
-                score = float(np.clip(rng.normal(0.82, 0.08), 0, 1))
-            else:
-                score = float(np.clip(rng.normal(0.35, 0.15), 0, 1))
-
-            threshold = 0.7
-            successful = is_compromised and score >= threshold
-
-            results.append(
-                DeanonymizationResult(
-                    seed=str(seed),
-                    group="general",
-                    origin_id=f"synthetic_seed{seed}_client{i}",
-                    circuit_id=f"circ_{seed}_{i}",
-                    confidence=float(np.clip(score + rng.normal(0, 0.05), 0, 1)),
-                    correlation_score=score,
-                    time_to_identify=float(rng.exponential(0.5)),
-                    attempted=True,
-                    successful=successful,
-                )
-            )
-
-        return results
 
     def _extra_info(self) -> Dict[str, Any]:
         """Return Guard+Exit-specific metadata for ``AttackResult.extra_info``.

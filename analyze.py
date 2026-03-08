@@ -24,9 +24,6 @@ Attack classes available
 Usage
 -----
 
-  # Quick demo - one guard-exit scenario, synthetic data
-  python analyze.py --synthetic guard-exit
-
   # Single scenario from real simulation logs
   python analyze.py \\
       --sim-dirs ./runs/seed_0 ./runs/seed_1 \\
@@ -39,12 +36,15 @@ Usage
       guard-exit --guard-fraction 0.30 --label "high adversary"
 
   # Generate specific plots only
-  python analyze.py --synthetic \\
+  python analyze.py \\
+      --sim-dirs ./runs/seed_0 ./runs/seed_1 \\
       --plots success_bar accuracy_coverage score_dist \\
       guard-exit --guard-fraction 0.15
 
   # Generate all available plots
-  python analyze.py --synthetic --plots all guard-exit
+  python analyze.py \\
+      --sim-dirs ./runs/seed_0 ./runs/seed_1 \\
+      --plots all guard-exit
 """
 
 import argparse
@@ -132,7 +132,6 @@ def _build_global_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "Shadow simulation output directories from simulate.py, one per seed. "
-            "Omit when --synthetic is set."
         ),
     )
     grp_io.add_argument(
@@ -141,12 +140,6 @@ def _build_global_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("results"),
         help="Destination for plots and JSON summary (default: ./results).",
-    )
-    grp_io.add_argument(
-        "--synthetic",
-        action="store_true",
-        default=False,
-        help="Use synthetic traffic profiles (no real logs required).",
     )
     grp_io.add_argument(
         "--plots",
@@ -190,10 +183,10 @@ def _split_argv(
 
     Example::
 
-        ["--synthetic", "guard-exit", "--guard-fraction", "0.10",
+        ["--output-dir", "./res", "guard-exit", "--guard-fraction", "0.10",
          "guard-exit", "--guard-fraction", "0.30"]
         →
-        global:   ["--synthetic"]
+        global:   ["--output-dir", "./res"]
         segments: [("guard-exit", ["--guard-fraction", "0.10"]),
                    ("guard-exit", ["--guard-fraction", "0.30"])]
     """
@@ -337,7 +330,7 @@ def _resolve_sim_dirs(
     num_seeds: int,
     output_dir: Path,
 ) -> List[Path]:
-    if global_args.sim_dirs and not global_args.synthetic:
+    if global_args.sim_dirs:
         dirs = global_args.sim_dirs
         if len(dirs) < num_seeds:
             logger.warning(
@@ -347,9 +340,8 @@ def _resolve_sim_dirs(
             return [dirs[i % len(dirs)] for i in range(num_seeds)]
         return list(dirs[:num_seeds])
 
-    base = output_dir / "synthetic_seeds"
-    base.mkdir(parents=True, exist_ok=True)
-    return [base / f"seed_{i}" for i in range(num_seeds)]
+    logger.error("Simulation directory not specified - exiting.")
+    raise ValueError("Simulation directory not specified.")
 
 
 def _print_metric_table(metrics: Dict[str, Any]) -> None:
@@ -678,7 +670,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         attack = entry.attack_cls(
             cfg,
             workspace=output_dir / "workspace",
-            synthetic=global_args.synthetic,
         )
         attack.configure()
 
