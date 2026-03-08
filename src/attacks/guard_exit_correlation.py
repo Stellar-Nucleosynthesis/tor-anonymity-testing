@@ -652,7 +652,7 @@ class GuardExitAttack(BaseAttack):
         for p in exit_profiles:
             circ = ground_truth.get((p.hostname, p.circuit_id), None)
             if circ is not None and circ.global_id not in exit_by_gid:
-                guard_by_gid[circ.global_id] = p
+                exit_by_gid[circ.global_id] = p
 
         paired_gids = list(set(guard_by_gid) & set(exit_by_gid))
         guard_only_gids = list(set(guard_by_gid) - set(paired_gids))
@@ -662,10 +662,8 @@ class GuardExitAttack(BaseAttack):
         e_max = exit_max if exit_max is not None else len(exit_profiles)
 
         if deanon_frac is None:
-            selected_gids = paired_gids + guard_only_gids
-            result_guard = [guard_by_gid[g] for g in selected_gids][:g_max]
-            selected_gids = paired_gids + exit_only_gids
-            result_exit = [exit_by_gid[g] for g in selected_gids][:e_max]
+            result_guard = [guard_by_gid[g] for g in paired_gids + guard_only_gids][:g_max]
+            result_exit = [exit_by_gid[g] for g in paired_gids + exit_only_gids][:e_max]
             return result_guard, result_exit
 
         max_deanon = min(len(paired_gids), g_max, e_max)
@@ -695,13 +693,11 @@ class GuardExitAttack(BaseAttack):
             if max_g_only + max_e_only < n_others:
                 continue
 
-            n_guard_only = min(max_g_only, n_others)
-            n_exit_only = n_others - n_guard_only
-            if n_exit_only > max_e_only:
-                n_exit_only = max_e_only
-                n_guard_only = n_others - n_exit_only
-                if n_guard_only > max_g_only:
-                    continue
+            n_guard_only = min(max_g_only, n_others // 2)
+            n_exit_only = min(max_e_only, n_others - n_guard_only)
+            n_guard_only = min(max_g_only, n_others - n_exit_only)
+            if n_guard_only + n_exit_only != n_others:
+                continue
 
             break
         else:
@@ -715,6 +711,20 @@ class GuardExitAttack(BaseAttack):
                 [exit_by_gid[g] for g in paired_gids[:n_deanon]] +
                 [exit_by_gid[g] for g in exit_only_gids[:n_exit_only]]
         )
+
+        paired_exit_gids = set()
+        for p in result_exit[:n_deanon]:
+            circ = ground_truth.get((p.hostname, p.circuit_id))
+            if circ is not None:
+                paired_exit_gids.add(circ.global_id)
+
+        for p in result_guard[:n_deanon]:
+            circ = ground_truth.get((p.hostname, p.circuit_id))
+            gid = circ.global_id if circ is not None else None
+            assert gid is not None and gid in paired_exit_gids, (
+                f"Guard profile {p.circuit_id} marked as deanonymized "
+                f"but no matching exit profile found (global_id={gid})"
+            )
 
         return result_guard, result_exit
 
