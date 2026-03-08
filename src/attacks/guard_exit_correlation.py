@@ -179,35 +179,8 @@ class GuardExitAttack(BaseAttack):
         if not self._adversary_guards or not self._adversary_exits:
             self._load_adversary_relays_from_hosts(hosts_dir, logger)
 
-        guard_profiles = self._load_profiles_from_oniontrace(
-            hosts_dir,
-            observation_point="guard",
-            relay_filter=self._adversary_guards,
-        )
-        exit_profiles = self._load_profiles_from_oniontrace(
-            hosts_dir,
-            observation_point="exit",
-            relay_filter=self._adversary_exits,
-        )
-
-        if not guard_profiles or not exit_profiles:
-            self.logger.warning(
-                "Seed=%d: guard_profiles=%d, exit_profiles=%d - insufficient data.",
-                seed,
-                len(guard_profiles),
-                len(exit_profiles),
-            )
-            return []
-
-        client_hostnames = self._resolve_client_filter(sim_dir)
         ground_truth = self._build_ground_truth(hosts_dir)
-
-        results = self._correlate_all_pairs(
-            guard_profiles, exit_profiles,
-            ground_truth,
-            client_filter=client_hostnames,
-            seed=seed
-        )
+        client_hostnames = self._resolve_client_filter(sim_dir)
 
         circuits_for_stats = [c.relays for c in set(ground_truth.values())]
         if circuits_for_stats:
@@ -227,9 +200,60 @@ class GuardExitAttack(BaseAttack):
                 self.config.adversary_guard_fraction,
                 self.config.adversary_exit_fraction,
             )
-            self.logger.debug("Theoretical deanon prob: %.4f", theoretical)
+            self.logger.debug(f"Theoretical deanon prob: {theoretical:.2%}")
 
-        return results
+        guard_profiles = self._load_profiles_from_oniontrace(
+            hosts_dir,
+            observation_point="guard",
+            relay_filter=self._adversary_guards,
+        )
+        exit_profiles = self._load_profiles_from_oniontrace(
+            hosts_dir,
+            observation_point="exit",
+            relay_filter=self._adversary_exits,
+        )
+
+        guard_profiles = self._filter_traffic_profiles(
+            guard_profiles, ground_truth, client_hostnames
+        )
+        exit_profiles = self._filter_traffic_profiles(
+            exit_profiles, ground_truth, client_hostnames
+        )
+
+        trimmed_guard_profiles, trimmed_exit_profiles = self._trim_traffic_profiles(
+            guard_profiles,
+            exit_profiles,
+            ground_truth,
+            self.ge_config.max_guard_profiles,
+            self.ge_config.max_exit_profiles,
+            self.ge_config.deanon_circ_frac
+        )
+
+        self.logger.info(
+            f"Left after trimming: {len(trimmed_guard_profiles)} guard profiles "
+            f"({len(trimmed_guard_profiles) / len(guard_profiles):.2%})"
+        )
+        self.logger.info(
+            f"Left after trimming: {len(trimmed_exit_profiles)} exit profiles "
+            f"({len(trimmed_exit_profiles) / len(exit_profiles):.2%})"
+        )
+
+        if not trimmed_guard_profiles or not trimmed_exit_profiles:
+            self.logger.warning(
+                "Seed=%d: guard_profiles=%d, exit_profiles=%d - insufficient data.",
+                seed,
+                len(trimmed_guard_profiles),
+                len(trimmed_exit_profiles),
+            )
+            return []
+
+        return self._correlate_all_pairs(
+            trimmed_guard_profiles,
+            trimmed_exit_profiles,
+            ground_truth,
+            client_filter=client_hostnames,
+            seed=seed
+        )
 
     def _resolve_client_filter(self, sim_dir: Path) -> Optional[Dict[str, str | None]]:
         """Return the mapping of allowed client hostnames to the  groups they
@@ -491,7 +515,7 @@ class GuardExitAttack(BaseAttack):
         g_bytes = max(g_prof.total_bytes, 1)
         lo_bytes = g_bytes / self._BW_RATIO_MAX
         hi_bytes = g_bytes * self._BW_RATIO_MAX
-        return [e for e in time_candidates if lo_bytes <= e.total_bytes <= hi_bytes and e != g_prof]
+        return [e for e in time_candidates if lo_bytes <= e.total_bytes <= hi_bytes and e is not g_prof]
 
     def _correlate_all_pairs(
             self,
@@ -526,27 +550,9 @@ class GuardExitAttack(BaseAttack):
         """
         results: List[DeanonymizationResult] = []
 
-        filtered_g_profs = self._filter_traffic_profiles(
-            guard_profiles, ground_truth, client_filter
-        )
-        filtered_e_profs = self._filter_traffic_profiles(
-            exit_profiles, ground_truth, client_filter
-        )
-
-        self.logger.info(
-            f"Left after filtering: {len(filtered_g_profs)} guard profiles "
-            f"({len(filtered_g_profs)/len(guard_profiles):.2%})"
-        )
-        self.logger.info(
-            f"Left after filtering: {len(filtered_e_profs)} exit profiles "
-            f"({len(filtered_e_profs) / len(exit_profiles):.2%})"
-        )
-
-        sorted_exits, exit_starts = self._build_exit_index(filtered_e_profs)
+        sorted_exits, exit_starts = self._build_exit_index(exit_profiles)
         total_candidates = 0
-        falsely_filtered = 0
-        falsely_evaluated = 0
-        for g_prof in filtered_g_profs:
+        for g_prof in guard_profiles:
             t_start = time.perf_counter()
             circuit = ground_truth[(g_prof.hostname, g_prof.circuit_id)]
 
@@ -555,14 +561,6 @@ class GuardExitAttack(BaseAttack):
 
             candidates = self._candidates_for_guard(g_prof, sorted_exits, exit_starts)
             total_candidates += len(candidates)
-
-            falsely_discarded_real = False
-            cand_circuits = [ground_truth.get((c.hostname, c.circuit_id), None)
-                                    for c in candidates]
-            cand_global_ids = [c.global_id for c in cand_circuits if c is not None]
-            if circuit.global_id not in cand_global_ids:
-                falsely_discarded_real = True
-                falsely_filtered += 1
 
             candidate_scores: List[Tuple[str, float]] = []
             for e_prof in candidates:
@@ -588,8 +586,6 @@ class GuardExitAttack(BaseAttack):
             candidate_scores.sort(key=lambda x: x[1], reverse=True)
             best_glob_id, best_score = candidate_scores[0]
             successful = best_glob_id == circuit.global_id
-            if not successful and not falsely_discarded_real:
-                falsely_evaluated += 1
 
             confidence = 1 / (1 + math.exp(-best_score))
 
@@ -610,19 +606,117 @@ class GuardExitAttack(BaseAttack):
         self.logger.debug(
             "Correlated %d guard profile(s) against %d exit profile(s): "
             "%d pair(s) evaluated (%.1f avg/guard; brute-force would be %d).",
-            len(results), len(filtered_e_profs),
-            total_candidates, total_candidates / max(len(filtered_g_profs), 1),
-            len(filtered_e_profs),
-        )
-        self.logger.debug(
-            f"Falsely discarded true exits for {falsely_filtered} guard profile(s) "
-            f"({falsely_filtered/len(filtered_g_profs):.2%}) during filtering"
-        )
-        self.logger.debug(
-            f"Falsely discarded true exits for {falsely_evaluated} guard profile(s) "
-            f"({falsely_evaluated / len(filtered_g_profs):.2%}) during evaluation"
+            len(results), len(exit_profiles),
+            total_candidates, total_candidates / max(len(guard_profiles), 1),
+            len(exit_profiles),
         )
         return results
+
+    @staticmethod
+    def _trim_traffic_profiles(
+            guard_profiles: List[TrafficProfile],
+            exit_profiles: List[TrafficProfile],
+            ground_truth: Dict[Tuple[str, str], Circuit],
+            guard_max: Optional[int],
+            exit_max: Optional[int],
+            deanon_frac: Optional[float],
+    ) -> Tuple[List[TrafficProfile], List[TrafficProfile]]:
+        """Return trimmed guard and exit profile lists satisfying size and
+        deanonymization fraction constraints.
+
+        A circuit is *deanonymized* when both a guard profile and an exit profile
+        in the result map to the same ``Circuit.global_id`` via ``ground_truth``.
+
+        Args:
+            guard_profiles: Profiles observed at guard relays.
+            exit_profiles: Profiles observed at exit relays.
+            ground_truth: Mapping of ``(hostname, or_circuit_id)`` to
+                ``Circuit``.  Used to join profiles across relays via
+                ``Circuit.global_id``.
+            guard_max: Maximum number of guard profiles to return.
+            exit_max: Maximum number of exit profiles to return.
+            deanon_frac: Desired fraction of deanonymized circuits in
+                ``[0.0, 1.0]``, or ``None`` to skip the constraint.
+
+        Returns:
+            A ``(guard_profiles, exit_profiles)`` tuple satisfying all
+            constraints, maximizing the total number of returned profiles.
+        """
+        guard_by_gid: Dict[str, TrafficProfile] = {}
+        for p in guard_profiles:
+            circ = ground_truth.get((p.hostname, p.circuit_id), None)
+            if circ is not None and circ.global_id not in guard_by_gid:
+                guard_by_gid[circ.global_id] = p
+
+        exit_by_gid: Dict[str, TrafficProfile] = {}
+        for p in exit_profiles:
+            circ = ground_truth.get((p.hostname, p.circuit_id), None)
+            if circ is not None and circ.global_id not in exit_by_gid:
+                guard_by_gid[circ.global_id] = p
+
+        paired_gids = list(set(guard_by_gid) & set(exit_by_gid))
+        guard_only_gids = list(set(guard_by_gid) - set(paired_gids))
+        exit_only_gids = list(set(exit_by_gid) - set(paired_gids))
+
+        g_max = guard_max if guard_max is not None else len(guard_profiles)
+        e_max = exit_max if exit_max is not None else len(exit_profiles)
+
+        if deanon_frac is None:
+            selected_gids = paired_gids + guard_only_gids
+            result_guard = [guard_by_gid[g] for g in selected_gids][:g_max]
+            selected_gids = paired_gids + exit_only_gids
+            result_exit = [exit_by_gid[g] for g in selected_gids][:e_max]
+            return result_guard, result_exit
+
+        max_deanon = min(len(paired_gids), g_max, e_max)
+
+        for n_deanon in range(max_deanon, -1, -1):
+            if deanon_frac == 0.0:
+                if n_deanon != 0:
+                    continue
+                n_guard_only = min(len(guard_only_gids), g_max)
+                n_exit_only = min(len(exit_only_gids), e_max)
+                break
+            if deanon_frac == 1.0:
+                if n_deanon == 0:
+                    continue
+                n_guard_only = 0
+                n_exit_only = 0
+                break
+
+            n_others_exact = n_deanon * (1.0 - deanon_frac) / deanon_frac
+            n_others = round(n_others_exact)
+
+            max_g_only = min(g_max - n_deanon, len(guard_only_gids))
+            max_e_only = min(e_max - n_deanon, len(exit_only_gids))
+
+            if max_g_only < 0 or max_e_only < 0:
+                continue
+            if max_g_only + max_e_only < n_others:
+                continue
+
+            n_guard_only = min(max_g_only, n_others)
+            n_exit_only = n_others - n_guard_only
+            if n_exit_only > max_e_only:
+                n_exit_only = max_e_only
+                n_guard_only = n_others - n_exit_only
+                if n_guard_only > max_g_only:
+                    continue
+
+            break
+        else:
+            return [], []
+
+        result_guard = (
+                [guard_by_gid[g] for g in paired_gids[:n_deanon]] +
+                [guard_by_gid[g] for g in guard_only_gids[:n_guard_only]]
+        )
+        result_exit = (
+                [exit_by_gid[g] for g in paired_gids[:n_deanon]] +
+                [exit_by_gid[g] for g in exit_only_gids[:n_exit_only]]
+        )
+
+        return result_guard, result_exit
 
 
     @staticmethod

@@ -240,6 +240,28 @@ def _add_guard_exit_args(p: argparse.ArgumentParser) -> None:
         help="Fraction of middle relays controlled by the adversary (default: 0).",
     )
     p.add_argument(
+        "--max-guard-profiles",
+        type=int,
+        default=None,
+        help="Maximum number of guard profiles to test for this scenario.",
+    )
+
+    p.add_argument(
+        "--max-exit-profiles",
+        type=int,
+        default=None,
+        help="Maximum number of exit profiles to test for this scenario.",
+    )
+
+    p.add_argument(
+        "--deanon-circuit-fraction",
+        type=_positive_fraction,
+        default=None,
+        metavar="FRAC",
+        help="Total fraction of analyzed circuits that have both guard and exit"
+             "compromised. Unnecessary circuits are trimmed.",
+    )
+    p.add_argument(
         "--method",
         metavar="METHOD",
         type=str,
@@ -317,6 +339,9 @@ def _build_guard_exit_config(args: argparse.Namespace, num_seeds: int) -> Any:
         adversary_guard_fraction=args.guard_fraction,
         adversary_exit_fraction=args.exit_fraction,
         adversary_middle_fraction=args.middle_fraction,
+        max_guard_profiles=args.max_guard_profiles,
+        max_exit_profiles=args.max_exit_profiles,
+        deanon_circ_frac=args.deanon_circuit_fraction,
         num_seeds=num_seeds,
         correlation_method=args.method,
         correlation_threshold=args.threshold,

@@ -1,6 +1,4 @@
 import abc
-import base64
-import binascii
 import dataclasses
 import glob
 import logging
@@ -55,6 +53,9 @@ class AttackConfig:
     adversary_guard_fraction: float = 0.10
     adversary_exit_fraction: float = 0.10
     adversary_middle_fraction: float = 0.0
+    max_guard_profiles: Optional[int] = None,
+    max_exit_profiles: Optional[int] = None,
+    deanon_circ_frac: Optional[float] = None,
     num_seeds: int = 3
     correlation_method: str = "cross_correlation"
     correlation_threshold: float = 0.9
