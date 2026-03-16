@@ -688,6 +688,7 @@ class SimulationOrchestrator:
 
     @staticmethod
     def _patch_shadow_tor_path(shadow_config: Path, tor_binary: Path):
+        """Correct path to Tor binary in shadow configuration."""
         tor_binary = str(tor_binary.resolve())
 
         with open(shadow_config, "r") as f:

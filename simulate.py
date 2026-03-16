@@ -374,10 +374,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     failed: List[int] = []
 
-    for seed_idx in seed_list:
-        seed_dir = output_dir / f"seed_{seed_idx}"
+    for seed in seed_list:
+        seed_dir = output_dir / f"seed_{seed}"
         logger.info("─" * 60)
-        logger.info("Seed %d  →  %s", seed_idx, seed_dir)
+        logger.info("Seed %d  →  %s", seed, seed_dir)
         logger.info("─" * 60)
 
         orc = SimulationOrchestrator(
@@ -388,7 +388,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
         try:
-            logger.info("[seed %d] generate...", seed_idx)
+            logger.info("[seed %d] generate...", seed)
             network_dir = orc.generate_network(
                 relayinfo_file=staged["relayinfo"],
                 userinfo_file=staged["userinfo"],
@@ -403,42 +403,56 @@ def main(argv: Optional[List[str]] = None) -> int:
             if client_groups:
                 logger.info(
                     "[seed %d] injecting %d client group(s)...",
-                    seed_idx, len(client_groups),
+                    seed, len(client_groups),
                 )
                 manifest = orc.inject_custom_clients(
                     network_dir=network_dir,
                     groups=client_groups,
-                    rng_seed=args.injection_seed + seed_idx,
+                    rng_seed=args.injection_seed + seed,
                 )
                 for gname, hosts in manifest.groups.items():
                     display = hosts if len(hosts) <= 5 else hosts[:5] + ["..."]
                     logger.info(
                         "[seed %d]   group '%s': %d host(s) - %s",
-                        seed_idx, gname, len(hosts), display,
+                        seed, gname, len(hosts), display,
                     )
 
-            logger.info("[seed %d] simulate (%ds)...", seed_idx, args.sim_time)
+            logger.info("[seed %d] simulate (%ds)...", seed, args.sim_time)
             orc.run_simulation(
                 network_dir,
                 additional_args=["--args", f"--stop-time {args.sim_time}"],
             )
 
-            logger.info("[seed %d] parse...", seed_idx)
+            logger.info("[seed %d] parse...", seed)
             orc.parse_results(network_dir)
 
             if args.plot:
-                logger.info("[seed %d] plot...", seed_idx)
-                orc.plot_results(network_dir)
+                logger.info("[seed %d] plot...", seed)
+                orc.plot_results(
+                    network_dir,
+                    tor_metrics_path=staged.get("tor_metrics", None)
+                )
 
             if args.archive:
-                logger.info("[seed %d] archive...", seed_idx)
+                logger.info("[seed %d] archive...", seed)
                 orc.archive_results(network_dir)
 
-            logger.info("[seed %d] ✓ complete: %s", seed_idx, seed_dir)
+            logger.info("[seed %d] ✓ complete: %s", seed, seed_dir)
 
         except Exception as exc:
-            logger.error("[seed %d] failed: %s", seed_idx, exc, exc_info=True)
-            failed.append(seed_idx)
+            logger.error("[seed %d] failed: %s", seed, exc, exc_info=True)
+            failed.append(seed)
+
+    orc_plot = SimulationOrchestrator(
+        workspace=output_dir,
+        tornettools_cmd=args.tornettools,
+        tor_binary=str(tor_binary) if tor_binary else None,
+        tor_gencert_binary=str(tor_gencert) if tor_gencert else None,
+    )
+    orc_plot.plot_results(
+        output_dir,
+        tor_metrics_path=staged.get("tor_metrics", None)
+    )
 
     succeeded = [s for s in seed_list if s not in failed]
     logger.info("─" * 60)
