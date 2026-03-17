@@ -8,14 +8,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from src.attacks.base_attack import RelayMetadata
+from src.attacks.relay_compromise_attack import RelayCompromiseAttackConfig, RelayCompromiseAttack, RelayMetadata
 from src.analysis.correlation import TrafficProfile
 from src.analysis.deanonymization import DeanonymizationResult
 from src.analysis.guard_exit import (
     compute_circuit_compromise_rate,
     compute_guard_exit_deanon_probability,
 )
-from src.attacks.base_attack import AttackConfig, BaseAttack
 
 
 logger = logging.getLogger("GuardExit")
@@ -34,12 +33,12 @@ class Circuit:
     origin: Tuple[str, str]
 
 @dataclass
-class GuardExitConfig(AttackConfig):
+class GuardExitConfig(RelayCompromiseAttackConfig):
     """Configuration for the Guard + Exit correlation attack.
     """
 
 
-class GuardExitAttack(BaseAttack):
+class GuardExitAttack(RelayCompromiseAttack):
     """Guard + Exit end-to-end traffic correlation attack.
 
     Implements the classic passive deanonymization attack where the adversary
@@ -73,6 +72,7 @@ class GuardExitAttack(BaseAttack):
 
         self._adversary_guards: List[str] = []
         self._adversary_exits: List[str] = []
+
 
     def _build_adversary_relay_list(
             self,
@@ -115,13 +115,13 @@ class GuardExitAttack(BaseAttack):
         ]
 
         adv_guards = self._select_adversary_relays(
-            guards, self.config.adversary_guard_fraction, rng
+            guards, self.ge_config.adversary_guard_fraction, rng
         )
         adv_exits = self._select_adversary_relays(
-            exits, self.config.adversary_exit_fraction, rng
+            exits, self.ge_config.adversary_exit_fraction, rng
         )
         adv_middles = self._select_adversary_relays(
-            middles, self.config.adversary_middle_fraction, rng
+            middles, self.ge_config.adversary_middle_fraction, rng
         )
 
         self.logger.info(
@@ -131,6 +131,7 @@ class GuardExitAttack(BaseAttack):
             len(adv_middles), len(middles),
         )
         return adv_guards, adv_middles, adv_exits
+
 
     def _run_single_seed(self, sim_dir: Path, *, seed: int) -> List[DeanonymizationResult]:
         """Analyze one seed's Shadow/OnionTrace output.
@@ -197,8 +198,8 @@ class GuardExitAttack(BaseAttack):
                 stats["full_compromise_rate"] * 100,
             )
             theoretical = compute_guard_exit_deanon_probability(
-                self.config.adversary_guard_fraction,
-                self.config.adversary_exit_fraction,
+                self.ge_config.adversary_guard_fraction,
+                self.ge_config.adversary_exit_fraction,
             )
             self.logger.debug(f"Theoretical deanon prob: {theoretical:.2%}")
 
@@ -254,6 +255,7 @@ class GuardExitAttack(BaseAttack):
             client_filter=client_hostnames,
             seed=seed
         )
+
 
     def _resolve_client_filter(self, sim_dir: Path) -> Optional[Dict[str, str | None]]:
         """Return the mapping of allowed client hostnames to the  groups they
@@ -316,6 +318,7 @@ class GuardExitAttack(BaseAttack):
     _RE_CIRC_BUILT: re.Pattern = re.compile(
         r'650 CIRC\s+(?P<cid>\d+)\s+BUILT\s+(?P<path>\S+)'
     )
+
 
     def _build_ground_truth(
             self,
@@ -424,6 +427,7 @@ class GuardExitAttack(BaseAttack):
         )
         return ground_truth
 
+
     @staticmethod
     def _parse_circ_path(path_str: str,) -> Optional[Tuple[str, ...]]:
         """Parse a ``CIRC BUILT`` path string into a relay hostname tuple.
@@ -447,6 +451,7 @@ class GuardExitAttack(BaseAttack):
 
     _BW_RATIO_MAX: float = 3.0
 
+
     @staticmethod
     def _build_exit_index(
             exit_profiles: List[TrafficProfile],
@@ -464,6 +469,7 @@ class GuardExitAttack(BaseAttack):
         sorted_exits = sorted(exit_profiles, key=lambda p: p.first_packet_time)
         exit_starts = [p.first_packet_time for p in sorted_exits]
         return sorted_exits, exit_starts
+
 
     def _candidates_for_guard(
             self,
@@ -516,6 +522,7 @@ class GuardExitAttack(BaseAttack):
         lo_bytes = g_bytes / self._BW_RATIO_MAX
         hi_bytes = g_bytes * self._BW_RATIO_MAX
         return [e for e in time_candidates if lo_bytes <= e.total_bytes <= hi_bytes and e is not g_prof]
+
 
     def _correlate_all_pairs(
             self,
@@ -611,6 +618,7 @@ class GuardExitAttack(BaseAttack):
             len(exit_profiles),
         )
         return results
+
 
     @staticmethod
     def _trim_traffic_profiles(
@@ -770,10 +778,18 @@ class GuardExitAttack(BaseAttack):
         return {
             "adversary_guard_count": len(self._adversary_guards),
             "adversary_exit_count": len(self._adversary_exits),
-            "adversary_guard_fraction": self.config.adversary_guard_fraction,
-            "adversary_exit_fraction": self.config.adversary_exit_fraction,
+            "adversary_guard_fraction": self.ge_config.adversary_guard_fraction,
+            "adversary_exit_fraction": self.ge_config.adversary_exit_fraction,
             "theoretical_deanon_probability": compute_guard_exit_deanon_probability(
-                self.config.adversary_guard_fraction,
-                self.config.adversary_exit_fraction,
+                self.ge_config.adversary_guard_fraction,
+                self.ge_config.adversary_exit_fraction,
             ),
         }
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"name={self.config.name!r}, "
+            f"guard_frac={self.ge_config.adversary_guard_fraction}, "
+            f"exit_frac={self.ge_config.adversary_exit_fraction})"
+        )
