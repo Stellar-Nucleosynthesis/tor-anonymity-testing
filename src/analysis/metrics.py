@@ -1,22 +1,125 @@
+from dataclasses import dataclass, asdict, fields
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
+@dataclass
+class IdentificationMetrics:
+    """Primary top-1 identification metrics for one scenario / seed."""
+    total_observed: int
+    attempted: int
+    correct: int
+    success_rate: float
+    coverage: float
+    abstention_rate: float
+    conditional_accuracy: float
+    mean_score_correct: float
+    mean_score_incorrect: float
+    score_separation: float
 
-def compute_identification_metrics(results: List[Any],) -> Dict[str, Any]:
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ThresholdPoint:
+    """Identification metrics evaluated at a single decision threshold."""
+    threshold: float
+    coverage: float
+    conditional_accuracy: float
+    success_rate: float
+    attempted: int
+    correct: int
+
+
+@dataclass
+class SeedVarianceMetrics:
+    """Aggregated mean / std / min / max of a scalar metric across seeds."""
+    num_seeds: int
+    stats: Dict[str, Dict[str, float]]
+
+    def mean(self, key: str) -> float:
+        return self.stats[key]["mean"]
+
+    def std(self, key: str) -> float:
+        return self.stats[key]["std"]
+
+    def min(self, key: str) -> float:
+        return self.stats[key]["min"]
+
+    def max(self, key: str) -> float:
+        return self.stats[key]["max"]
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"num_seeds": self.num_seeds}
+        for key, s in self.stats.items():
+            for stat, val in s.items():
+                out[f"{stat}_{key}"] = val
+        return out
+
+
+@dataclass
+class MetricComparison:
+    """Comparison of one metric across multiple scenarios."""
+    values: Dict[str, float]
+    best_scenario: str
+    mean: float
+    std: float
+
+
+@dataclass
+class ScenarioComparison:
+    """Result of comparing identification metrics across multiple scenarios."""
+    scenarios: List[str]
+    metrics_comparison: Dict[str, MetricComparison]
+
+    def best(self, metric: str) -> str:
+        return self.metrics_comparison[metric].best_scenario
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "scenarios": self.scenarios,
+            "metrics_comparison": {
+                k: asdict(v) for k, v in self.metrics_comparison.items()
+            },
+        }
+
+
+@dataclass
+class StatisticalSignificanceResult:
+    """Result of a two-sample significance test between two scenarios."""
+    test: str
+    statistic: float
+    p_value: float
+    significant: bool
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def compute_identification_metrics(
+    results: List[Any],
+) -> IdentificationMetrics:
     """Compute primary top-1 identification metrics.
 
     Args:
         results: List of ``DeanonymizationResult`` objects.
 
     Returns:
-        Flat dict with the following keys:
-
-        total_observed, attempted, correct,
-        success_rate, coverage, abstention_rate, conditional_accuracy,
-        mean_score_correct, mean_score_incorrect, score_separation.
+        ``IdentificationMetrics`` dataclass instance.
     """
     if not results:
-        return _empty_identification_metrics()
+        return IdentificationMetrics(
+            total_observed=0,
+            attempted=0,
+            correct=0,
+            success_rate=0.0,
+            coverage=0.0,
+            abstention_rate=1.0,
+            conditional_accuracy=0.0,
+            mean_score_correct=0.0,
+            mean_score_incorrect=0.0,
+            score_separation=0.0,
+        )
 
     attempted = [r for r in results if r.attempted]
 
@@ -33,93 +136,45 @@ def compute_identification_metrics(results: List[Any],) -> Dict[str, Any]:
     mean_correct = float(np.mean(scores_correct)) if scores_correct else 0.0
     mean_incorrect = float(np.mean(scores_incorrect)) if scores_incorrect else 0.0
 
-    return {
-        "total_observed":       n_total,
-        "attempted":            n_attempted,
-        "correct":              n_correct,
-        "success_rate":         float(success_rate),
-        "coverage":             float(coverage),
-        "abstention_rate":      float(1.0 - coverage),
-        "conditional_accuracy": float(conditional_accuracy),
-        "mean_score_correct":   mean_correct,
-        "mean_score_incorrect": mean_incorrect,
-        "score_separation":     float(mean_correct - mean_incorrect),
-    }
-
-
-def compute_timing_metrics(results: List[Any]) -> Dict[str, float]:
-    """Compute timing statistics over all attempted identifications.
-
-    Both successful and unsuccessful results are included so the caller can
-    understand the full cost of running the attack.
-
-    Args:
-        results: List of ``DeanonymizationResult`` objects.
-
-    Returns:
-        Dict with ``{mean,median,p95,min,max,std}_time_s`` for all results,
-        and ``correct_{mean,median,p95,min,max,std}_time_s`` for successful
-        identifications only.  All values are wall-clock seconds.
-    """
-    if not results:
-        return {k: 0.0 for k in _timing_keys()}
-
-    results = [r for r in results if r.attempted]
-
-    times_all = np.array([r.time_to_identify for r in results])
-    times_correct = np.array([r.time_to_identify for r in results if r.successful])
-
-    def _stats(arr: np.ndarray, prefix: str = "") -> Dict[str, float]:
-        if len(arr) == 0:
-            return {f"{prefix}{s}": 0.0
-                    for s in ("mean_time_s", "median_time_s", "p95_time_s",
-                              "min_time_s",  "max_time_s",  "std_time_s")}
-        return {
-            f"{prefix}mean_time_s":   float(np.mean(arr)),
-            f"{prefix}median_time_s": float(np.median(arr)),
-            f"{prefix}p95_time_s":    float(np.percentile(arr, 95)),
-            f"{prefix}min_time_s":    float(np.min(arr)),
-            f"{prefix}max_time_s":    float(np.max(arr)),
-            f"{prefix}std_time_s":    float(np.std(arr)),
-        }
-
-    return {**_stats(times_all), **_stats(times_correct, "correct_")}
+    return IdentificationMetrics(
+        total_observed = n_total,
+        attempted = n_attempted,
+        correct = n_correct,
+        success_rate = float(success_rate),
+        coverage = float(coverage),
+        abstention_rate = float(1.0 - coverage),
+        conditional_accuracy = float(conditional_accuracy),
+        mean_score_correct = mean_correct,
+        mean_score_incorrect = mean_incorrect,
+        score_separation = float(mean_correct - mean_incorrect),
+    )
 
 
 def compute_threshold_sweep(
     results: List[Any],
     n_thresholds: int = 100,
     threshold_range: Optional[Tuple[float, float]] = None,
-) -> List[Dict[str, float]]:
+) -> List[ThresholdPoint]:
     """Evaluate accuracy and coverage at a range of decision thresholds.
 
-    For each threshold *t*, a prediction is made only when the best
-    correlation score ≥ *t*.  As *t* increases:
-
-    - coverage falls (the attack abstains more often),
-    - conditional accuracy rises (only high-confidence guesses pass).
-
     Args:
-        results: List of ``DeanonymizationResult`` objects, each carrying
-            ``correlation_score`` (score at the chosen threshold) and
-            ``successful``.
+        results: List of ``DeanonymizationResult`` objects.
         n_thresholds: Number of evenly-spaced threshold values to evaluate.
         threshold_range: ``(lo, hi)`` override.  Defaults to the score range
-            in *results* padded by 1 % on each side.
+            padded by 1 % on each side.
 
     Returns:
-        List of dicts sorted by ascending threshold.  Each dict contains:
-        ``threshold``, ``coverage``, ``conditional_accuracy``,
-        ``success_rate``, ``attempted``, ``correct``.
+        List of ``ThresholdPoint`` instances sorted by ascending threshold.
     """
     if not results:
         return []
 
     n_total = len(results)
-    results = [r for r in results if r.attempted]
-    if not results:
+    attempted = [r for r in results if r.attempted]
+    if not attempted:
         return []
-    scores  = np.array([r.correlation_score for r in results])
+
+    scores = np.array([r.correlation_score for r in attempted])
 
     if threshold_range is not None:
         lo, hi = threshold_range
@@ -129,76 +184,62 @@ def compute_threshold_sweep(
         lo -= pad
         hi += pad
 
-    sweep: List[Dict[str, float]] = []
+    sweep: List[ThresholdPoint] = []
     for t in np.linspace(lo, hi, n_thresholds):
         mask = scores >= t
-        attempted = int(mask.sum())
-        correct = sum(1 for r, a in zip(results, mask) if a and r.successful)
-
-        sweep.append({
-            "threshold": float(t),
-            "coverage": attempted / n_total if n_total > 0 else 0.0,
-            "conditional_accuracy": correct / attempted if attempted > 0 else 0.0,
-            "success_rate": correct / n_total if n_total > 0 else 0.0,
-            "attempted": attempted,
-            "correct": correct,
-        })
+        n_att = int(mask.sum())
+        n_correct = sum(1 for r, a in zip(attempted, mask) if a and r.successful)
+        sweep.append(ThresholdPoint(
+            threshold = float(t),
+            coverage = n_att / n_total if n_total > 0 else 0.0,
+            conditional_accuracy = n_correct / n_att if n_att > 0 else 0.0,
+            success_rate = n_correct / n_total if n_total > 0 else 0.0,
+            attempted = n_att,
+            correct = n_correct,
+        ))
     return sweep
 
 
-def compute_seed_variance(per_seed_metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
+def compute_seed_variance(
+    per_seed_metrics: List[IdentificationMetrics],
+) -> SeedVarianceMetrics:
     """Summarize variance of identification metrics across simulation seeds.
 
     Args:
-        per_seed_metrics: One metric dict per seed, each produced by
-            ``compute_identification_metrics``.
+        per_seed_metrics: One ``IdentificationMetrics`` per seed.
 
     Returns:
-        Dict with ``mean_*``, ``std_*``, ``min_*``, ``max_*`` for every scalar
-        metric key present in at least one seed dict, plus ``num_seeds``.
+        ``SeedVarianceMetrics`` instance.
     """
     if not per_seed_metrics:
-        return {"num_seeds": 0}
+        return SeedVarianceMetrics(num_seeds=0, stats={})
 
-    scalar_keys = {
-        k for d in per_seed_metrics
-        for k, v in d.items()
-        if isinstance(v, (int, float)) and not np.isnan(float(v))
-    }
+    scalar_fields = [f.name for f in fields(IdentificationMetrics)
+                     if f.type in ("float", "int")]
 
-    out: Dict[str, Any] = {"num_seeds": len(per_seed_metrics)}
-    for key in sorted(scalar_keys):
-        vals = np.array(
-            [d[key] for d in per_seed_metrics
-             if key in d and isinstance(d[key], (int, float))],
-            dtype=float,
-        )
-        if len(vals) == 0:
-            continue
-        out[f"mean_{key}"] = float(np.mean(vals))
-        out[f"std_{key}"]  = float(np.std(vals))
-        out[f"min_{key}"]  = float(np.min(vals))
-        out[f"max_{key}"]  = float(np.max(vals))
+    stats: Dict[str, Dict[str, float]] = {}
+    for key in scalar_fields:
+        vals = np.array([getattr(m, key) for m in per_seed_metrics], dtype=float)
+        stats[key] = {
+            "mean": float(np.mean(vals)),
+            "std": float(np.std(vals)),
+            "min": float(np.min(vals)),
+            "max": float(np.max(vals)),
+        }
 
-    return out
+    return SeedVarianceMetrics(num_seeds=len(per_seed_metrics), stats=stats)
 
 
 def compare_scenarios(
-    scenario_metrics: Dict[str, Dict[str, Any]],
-) -> Dict[str, Any]:
+    scenario_metrics: Dict[str, IdentificationMetrics],
+) -> ScenarioComparison:
     """Compare identification metrics across multiple attack scenarios.
 
     Args:
-        scenario_metrics: Mapping of scenario label → metric dict as produced
-            by ``compute_identification_metrics`` (optionally merged with
-            ``compute_timing_metrics``).
+        scenario_metrics: Mapping of scenario label → ``IdentificationMetrics``.
 
     Returns:
-        Dict with:
-
-        * ``scenarios`` - list of labels.
-        * ``metrics_comparison`` - per-metric sub-dict with ``values``,
-          ``best_scenario``, ``mean``, and ``std`` across scenarios.
+        ``ScenarioComparison`` dataclass instance.
     """
     lower_is_better = {"abstention_rate", "mean_time_s", "mean_score_incorrect"}
 
@@ -208,54 +249,51 @@ def compare_scenarios(
         "conditional_accuracy",
         "abstention_rate",
         "score_separation",
-        "mean_time_s",
         "correct",
         "attempted",
     ]
 
-    comparison: Dict[str, Any] = {
-        "scenarios": list(scenario_metrics.keys()),
-        "metrics_comparison": {},
-    }
-
+    comparisons: Dict[str, MetricComparison] = {}
     for metric in key_metrics:
         values: Dict[str, float] = {
-            label: float(m[metric])
+            label: float(getattr(m, metric))
             for label, m in scenario_metrics.items()
-            if metric in m and isinstance(m.get(metric), (int, float))
+            if hasattr(m, metric)
         }
         if not values:
             continue
+        best = (min(values, key=values.__getitem__)
+                if metric in lower_is_better
+                else max(values, key=values.__getitem__))
+        arr = np.array(list(values.values()))
+        comparisons[metric] = MetricComparison(
+            values = values,
+            best_scenario = best,
+            mean = float(np.mean(arr)),
+            std = float(np.std(arr)),
+        )
 
-        best = min(values, key=values.get) if metric in lower_is_better \
-            else max(values, key=values.get)
-        arr  = np.array(list(values.values()))
-
-        comparison["metrics_comparison"][metric] = {
-            "values":        values,
-            "best_scenario": best,
-            "mean":          float(np.mean(arr)),
-            "std":           float(np.std(arr)),
-        }
-
-    return comparison
+    return ScenarioComparison(
+        scenarios = list(scenario_metrics.keys()),
+        metrics_comparison = comparisons,
+    )
 
 
 def statistical_significance(
     results_a: List[Any],
     results_b: List[Any],
-) -> Dict[str, Any]:
+) -> StatisticalSignificanceResult:
     """Test whether two scenarios differ significantly in identification success.
 
-    Uses a Mann-Whitney U-test on correlation scores - valid for unequal
-    sample sizes and makes no normality assumption.
+    Uses a Mann-Whitney U-test on correlation scores — valid for unequal
+    sample sizes, no normality assumption required.
 
     Args:
         results_a: ``DeanonymizationResult`` list from scenario A.
         results_b: ``DeanonymizationResult`` list from scenario B.
 
     Returns:
-        Dict with ``statistic``, ``p_value``, ``significant`` (p < 0.05).
+        ``StatisticalSignificanceResult`` dataclass instance.
     """
     from scipy.stats import mannwhitneyu
 
@@ -263,31 +301,9 @@ def statistical_significance(
     scores_b = np.array([r.correlation_score for r in results_b])
     stat, p  = mannwhitneyu(scores_a, scores_b, alternative="two-sided")
 
-    return {
-        "test":        "mann_whitney_u",
-        "statistic":   float(stat),
-        "p_value":     float(p),
-        "significant": bool(p < 0.05),
-    }
-
-
-def _empty_identification_metrics() -> Dict[str, Any]:
-    return {
-        "total_observed":       0,
-        "attempted":            0,
-        "correct":              0,
-        "success_rate":         0.0,
-        "coverage":             0.0,
-        "abstention_rate":      1.0,
-        "conditional_accuracy": 0.0,
-        "mean_score_correct":   0.0,
-        "mean_score_incorrect": 0.0,
-        "score_separation":     0.0,
-    }
-
-
-def _timing_keys() -> List[str]:
-    prefixes = ("", "correct_")
-    suffixes = ("mean_time_s", "median_time_s", "p95_time_s",
-                "min_time_s",  "max_time_s",    "std_time_s")
-    return [p + s for p in prefixes for s in suffixes]
+    return StatisticalSignificanceResult(
+        test = "mann_whitney_u",
+        statistic = float(stat),
+        p_value = float(p),
+        significant = bool(p < 0.05),
+    )

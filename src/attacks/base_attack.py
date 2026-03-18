@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from src.analysis.metrics import IdentificationMetrics
 from src.analysis.deanonymization import DeanonymizationResult, evaluate_attack
 
 @dataclass
@@ -70,8 +71,7 @@ class AttackResult:
         config: The ``AttackConfig`` used for this run.
         deanon_results: One ``DeanonymizationResult`` per circuit, aggregated
             across all seeds.
-        metrics: Flat metrics dict produced by ``evaluate_attack`` (keys such
-            as ``success_rate``, ``coverage``, ``conditional_accuracy``).
+        metrics: Metrics object produced by ``evaluate_attack``.
         per_seed_metrics: Per-seed metric dicts for variance analysis.
         elapsed_seconds: Wall-clock seconds for the complete ``run`` call.
         extra_info: Arbitrary metadata populated by the subclass via
@@ -82,25 +82,25 @@ class AttackResult:
     scenario_label: str
     config: AttackConfig
     deanon_results: List[DeanonymizationResult]
-    metrics: Dict[str, Any]
-    per_seed_metrics: List[Dict[str, Any]] = field(default_factory=list)
+    metrics: IdentificationMetrics
+    per_seed_metrics: List[IdentificationMetrics] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     extra_info: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def success_rate(self) -> float:
         """float: Fraction of circuits successfully deanonymized."""
-        return float(self.metrics.get("success_rate", 0.0))
+        return float(self.metrics.success_rate)
 
     @property
     def coverage(self) -> float:
         """coverage: Fraction of circuits For which a prediction was made."""
-        return float(self.metrics.get("coverage", 0.0))
+        return float(self.metrics.coverage)
 
     @property
     def conditional_accuracy(self) -> float:
         """float: Accuracy of deanonymization attempts."""
-        return float(self.metrics.get("conditional_accuracy", 0.0))
+        return float(self.metrics.conditional_accuracy)
 
     def summary(self) -> str:
         """Return a compact multi-line summary string suitable for logging.
@@ -205,7 +205,7 @@ class BaseAttack(abc.ABC):
 
         t0 = time.perf_counter()
         all_results: List[DeanonymizationResult] = []
-        per_seed_metrics: List[Dict[str, Any]] = []
+        per_seed_metrics: List[IdentificationMetrics] = []
 
         for seed_idx, sim_dir in enumerate(simulation_dirs):
             self.logger.info(

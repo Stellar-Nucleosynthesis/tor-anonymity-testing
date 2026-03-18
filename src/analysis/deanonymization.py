@@ -1,13 +1,7 @@
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-from src.analysis.metrics import (
-    compare_scenarios,
-    compute_identification_metrics,
-    compute_seed_variance,
-    compute_timing_metrics,
-    statistical_significance,
-)
+from src.analysis.metrics import IdentificationMetrics, compute_identification_metrics
 
 
 @dataclass
@@ -37,7 +31,7 @@ class DeanonymizationResult:
     time_to_identify: Optional[float] = None
 
 
-def evaluate_attack(results: List[DeanonymizationResult]) -> Dict[str, Any]:
+def evaluate_attack(results: List[DeanonymizationResult]) -> IdentificationMetrics:
     """Compute identification and timing metrics for one attack run.
 
     Args:
@@ -45,18 +39,7 @@ def evaluate_attack(results: List[DeanonymizationResult]) -> Dict[str, Any]:
             seeds.
 
     Returns:
-        Merged dict from ``compute_identification_metrics`` and
-        ``compute_timing_metrics``.  All keys are documented in
-        ``src/analysis/metrics.py``.
+        An object that contains statistical metrics of an attack.
     """
     metrics = compute_identification_metrics(results)
-    metrics.update(compute_timing_metrics(results))
     return metrics
-
-__all__ = [
-    "DeanonymizationResult",
-    "evaluate_attack",
-    "compare_scenarios",
-    "compute_seed_variance",
-    "statistical_significance",
-]

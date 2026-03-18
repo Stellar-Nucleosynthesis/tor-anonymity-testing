@@ -60,8 +60,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from src.analysis.deanonymization import DeanonymizationResult
-from src.analysis.metrics import compare_scenarios, compute_seed_variance
-from src.analysis.deanonymization import evaluate_attack
+from src.analysis.metrics import compare_scenarios, compute_seed_variance, compute_threshold_sweep, ThresholdPoint, IdentificationMetrics
 from src.visualization import plots as vplots
 
 matplotlib.use("Agg")
@@ -78,13 +77,10 @@ logger = logging.getLogger("analyze")
 
 _ALL_PLOTS = frozenset({
     "success_bar",          # grouped bar chart - metrics across scenarios
-    "success_line",         # line chart - metric vs. parameter sweep
     "accuracy_coverage",    # threshold-sweep curve for each scenario
     "score_dist",           # histogram of scores: correct vs. incorrect
-    "timing",               # timing distribution box plot
     "seed_variance",        # box plot of per-seed success rates
     "ge_matrix",            # guard-fraction × exit-fraction heatmap (guard-exit only)
-    "group_metrics",        # bar chart comparing metrics across client groups
 })
 
 _PLOT_HELP = (
@@ -352,8 +348,7 @@ def _build_guard_exit_config(args: argparse.Namespace, num_seeds: int) -> Any:
 
 def _resolve_sim_dirs(
     global_args: argparse.Namespace,
-    num_seeds: int,
-    output_dir: Path,
+    num_seeds: int
 ) -> List[Path]:
     if global_args.sim_dirs:
         dirs = global_args.sim_dirs
@@ -369,7 +364,7 @@ def _resolve_sim_dirs(
     raise ValueError("Simulation directory not specified.")
 
 
-def _print_metric_table(metrics: Dict[str, Any]) -> None:
+def _print_metric_table(metrics: IdentificationMetrics) -> None:
     rows = [
         ("Total observed",       "total_observed"),
         ("Attempted",            "attempted"),
@@ -379,18 +374,13 @@ def _print_metric_table(metrics: Dict[str, Any]) -> None:
         ("Abstention rate",      "abstention_rate"),
         ("Conditional accuracy", "conditional_accuracy"),
         ("Score separation",     "score_separation"),
-        ("Mean score (correct)",   "mean_score_correct"),
-        ("Mean score (incorrect)", "mean_score_incorrect"),
-        ("Mean time (s)",        "mean_time_s"),
-        ("Median time (s)",      "median_time_s"),
-        ("P95 time (s)",         "p95_time_s"),
     ]
     print(f"\n  {'Metric':<28} {'Value':>10}")
     print("  " + "─" * 34)
     for label, key in rows:
-        if key not in metrics:
+        v = getattr(metrics, key, None)
+        if v is None:
             continue
-        v = metrics[key]
         if isinstance(v, float):
             print(f"  {label:<28} {v:>10.4f}")
         else:
@@ -426,44 +416,50 @@ def _save_figure(fig: plt.Figure, path: Path) -> None:
 
 
 def _render_report(
-    results:      Dict[str, Any],
-    labels:       Dict[str, str],
-    sweeps:       Dict[str, Any],
-    deanon_map:   Dict[str, List[Any]],
-    per_seed_map: Dict[str, List[Dict[str, Any]]],
-    output_dir:   Path,
-    plot_set:     frozenset,
+        results: Dict[str, Any],
+        labels: Dict[str, str],
+        sweeps: Dict[str, List[ThresholdPoint]],
+        deanon_map: Dict[str, List[Any]],
+        per_seed_map: Dict[str, List[IdentificationMetrics]],
+        output_dir: Path,
+        plot_set: frozenset,
 ) -> None:
     """Generate plots and write the JSON summary.
 
     Args:
         results:      scenario_key → AttackResult.
         labels:       scenario_key → display label.
-        sweeps:       scenario_key → threshold sweep list.
+        sweeps:       scenario_key → list of ThresholdPoint (from
+                      ``compute_threshold_sweep``).
         deanon_map:   scenario_key → list of DeanonymizationResult.
-        per_seed_map: scenario_key → list of per-seed metric dicts.
+        per_seed_map: scenario_key → list of per-seed IdentificationMetrics.
         output_dir:   destination directory.
-        plot_set:     set of plot names to generate.
+        plot_set:     set of plot names to generate.  Valid names:
+                      ``"success_bar"``, ``"accuracy_coverage"``,
+                      ``"score_dist"``, ``"seed_variance"``, ``"ge_matrix"``.
     """
+    output_dir.mkdir(parents=True, exist_ok=True)
     for key, res in results.items():
         print("\n" + "─" * 60)
         print(res.summary())
         _print_metric_table(res.metrics)
 
-    scenario_metrics = {labels.get(k, k): r.metrics for k, r in results.items()}
+    scenario_metrics: Dict[str, IdentificationMetrics] = {
+        labels.get(k, k): r.metrics for k, r in results.items()
+    }
 
-    if "success_bar" in plot_set and len(results) >= 1:
+    if "success_bar" in plot_set:
         try:
             fig = vplots.plot_success_rate_bar(scenario_metrics)
             _save_figure(fig, output_dir / "success_rate_bar.png")
         except NotImplementedError:
-            logger.debug("plot_success_rate_bar not yet implemented - skipping.")
+            logger.debug("plot_success_rate_bar not implemented — skipping.")
         except Exception as exc:
             logger.warning("success_bar plot failed: %s", exc)
 
-    if "accuracy_coverage" in plot_set:
+    if "accuracy_coverage" in plot_set and sweeps:
+        named_sweeps = {labels.get(k, k): sweeps[k] for k in sweeps if k in sweeps}
         try:
-            named_sweeps = {labels.get(k, k): sweeps[k] for k in sweeps}
             if len(named_sweeps) == 1:
                 label, sweep = next(iter(named_sweeps.items()))
                 fig = vplots.plot_accuracy_coverage(sweep, scenario_label=label)
@@ -472,73 +468,43 @@ def _render_report(
                 fig = vplots.plot_accuracy_coverage_multi(named_sweeps)
                 _save_figure(fig, output_dir / "accuracy_coverage_multi.png")
         except NotImplementedError:
-            logger.debug("accuracy_coverage plots not yet implemented - skipping.")
+            logger.debug("accuracy_coverage plots not implemented — skipping.")
         except Exception as exc:
             logger.warning("accuracy_coverage plot failed: %s", exc)
 
     if "score_dist" in plot_set:
         for key, dres in deanon_map.items():
+            if not dres:
+                continue
             try:
                 fig = vplots.plot_score_distribution(
-                    dres, title=f"Score Distribution - {labels.get(key, key)}"
+                    dres,
+                    title=f"Score Distribution — {labels.get(key, key)}",
                 )
                 safe = key.replace(" ", "_").replace("/", "_")
                 _save_figure(fig, output_dir / f"{safe}_score_dist.png")
             except NotImplementedError:
-                logger.debug("plot_score_distribution not yet implemented - skipping.")
+                logger.debug("plot_score_distribution not implemented — skipping.")
                 break
             except Exception as exc:
                 logger.warning("score_dist for '%s' failed: %s", key, exc)
 
-    if "timing" in plot_set:
-        try:
-            fig = vplots.plot_timing_distribution(
-                {labels.get(k, k): v for k, v in deanon_map.items()}
-            )
-            _save_figure(fig, output_dir / "timing_distribution.png")
-        except NotImplementedError:
-            logger.debug("plot_timing_distribution not yet implemented - skipping.")
-        except Exception as exc:
-            logger.warning("timing plot failed: %s", exc)
-
-    group_metrics_map: Dict[str, Dict[str, Any]] = {}
-    for key, res in results.items():
-        grp_split = _split_results_by_group(res.deanon_results)
-        group_metrics_map[key] = {
-            grp: evaluate_attack(grp_results)
-            for grp, grp_results in grp_split.items()
-        }
-
-    if "group_metrics" in plot_set:
-        for key, grp_metrics in group_metrics_map.items():
-            if len(grp_metrics) < 2:
-                logger.debug(
-                    "group_metrics: only one group in '%s' - skipping plot.", key
-                )
-                continue
-            try:
-                fig = vplots.plot_group_metrics_bar(
-                    grp_metrics,
-                    title=f"Group Metrics - {labels.get(key, key)}",
-                )
-                safe = key.replace(" ", "_").replace("/", "_")
-                _save_figure(fig, output_dir / f"{safe}_group_metrics.png")
-            except NotImplementedError:
-                logger.debug("plot_group_metrics_bar not yet implemented - skipping.")
-                break
-            except Exception as exc:
-                logger.warning("group_metrics plot for '%s' failed: %s", key, exc)
-
     if "seed_variance" in plot_set:
-        per_seed_named = {labels.get(k, k): v for k, v in per_seed_map.items() if v}
+        per_seed_named = {
+            labels.get(k, k): v
+            for k, v in per_seed_map.items()
+            if v
+        }
         if per_seed_named:
             try:
                 fig = vplots.plot_seed_variance_box(per_seed_named)
                 _save_figure(fig, output_dir / "seed_variance.png")
             except NotImplementedError:
-                logger.debug("plot_seed_variance_box not yet implemented - skipping.")
+                logger.debug("plot_seed_variance_box not implemented — skipping.")
             except Exception as exc:
                 logger.warning("seed_variance plot failed: %s", exc)
+        else:
+            logger.debug("seed_variance: no multi-seed data available — skipping.")
 
     if "ge_matrix" in plot_set:
         ge_results = {
@@ -548,50 +514,63 @@ def _render_report(
         }
         if len(ge_results) >= 4:
             try:
-                gf_set = sorted({r.extra_info["adversary_guard_fraction"]
-                                 for r in ge_results.values()})
-                ef_set = sorted({r.extra_info["adversary_exit_fraction"]
-                                 for r in ge_results.values()})
+                gf_set = sorted({
+                    r.extra_info["adversary_guard_fraction"]
+                    for r in ge_results.values()
+                })
+                ef_set = sorted({
+                    r.extra_info["adversary_exit_fraction"]
+                    for r in ge_results.values()
+                })
                 matrix = np.zeros((len(gf_set), len(ef_set)))
                 for r in ge_results.values():
                     gi = gf_set.index(r.extra_info["adversary_guard_fraction"])
                     ei = ef_set.index(r.extra_info["adversary_exit_fraction"])
-                    matrix[gi, ei] = r.metrics.get("success_rate", 0.0)
+                    matrix[gi, ei] = r.metrics.success_rate
                 fig = vplots.plot_guard_exit_matrix(gf_set, ef_set, matrix)
                 _save_figure(fig, output_dir / "guard_exit_matrix.png")
             except NotImplementedError:
-                logger.debug("plot_guard_exit_matrix not yet implemented - skipping.")
+                logger.debug("plot_guard_exit_matrix not implemented — skipping.")
             except Exception as exc:
                 logger.warning("ge_matrix plot failed: %s", exc)
         else:
             logger.debug(
                 "ge_matrix requires ≥4 scenarios with varying guard/exit fractions "
-                "- skipping (found %d).", len(ge_results)
+                "— skipping (found %d).", len(ge_results),
             )
 
     if len(results) > 1:
         comp = compare_scenarios(scenario_metrics)
         logger.info("Best scenario per metric:")
-        for metric, data in comp.get("metrics_comparison", {}).items():
-            best = data.get("best_scenario", "-")
-            val  = data.get("values", {}).get(best, "?")
+        for metric, mc in comp.metrics_comparison.items():
+            val = mc.values.get(mc.best_scenario, 0.0)
             logger.info(
                 "  %-28s → %-35s %.4f",
-                metric, best, val if isinstance(val, float) else 0,
+                metric, mc.best_scenario, val,
             )
 
     summary: Dict[str, Any] = {}
     for key, res in results.items():
+        seed_variance = compute_seed_variance(per_seed_map.get(key, []))
         summary[key] = {
-            "label":           labels.get(key, key),
-            "attack":          res.attack_name,
+            "label": labels.get(key, key),
+            "attack": res.attack_name,
             "elapsed_seconds": res.elapsed_seconds,
-            "num_circuits":    len(res.deanon_results),
-            "metrics":         res.metrics,
-            "group_metrics":   group_metrics_map.get(key, {}),
-            "seed_variance":   compute_seed_variance(res.per_seed_metrics),
-            "extra_info":      res.extra_info,
-            "threshold_sweep": sweeps.get(key, []),
+            "num_circuits": len(res.deanon_results),
+            "metrics": res.metrics.to_dict(),
+            "seed_variance": seed_variance.to_dict(),
+            "extra_info": res.extra_info,
+            "threshold_sweep": [
+                {
+                    "threshold": p.threshold,
+                    "coverage": p.coverage,
+                    "conditional_accuracy": p.conditional_accuracy,
+                    "success_rate": p.success_rate,
+                    "attempted": p.attempted,
+                    "correct": p.correct,
+                }
+                for p in sweeps.get(key, [])
+            ],
         }
 
     summary_path = output_dir / "scenario_summary.json"
@@ -674,14 +653,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "".join(f"\n  [{i+1}] {lbl}" for i, (_, _, lbl, _) in enumerate(scenarios)),
     )
 
-    from src.analysis.deanonymization import evaluate_attack
-    from src.analysis.metrics import compute_threshold_sweep
-
     results: Dict[str, Any] = {}
     labels: Dict[str, str] = {}
     sweeps: Dict[str, Any] = {}
     deanon_map: Dict[str, List[Any]] = {}
-    per_seed_map: Dict[str, List[Dict[str, Any]]] = {}
+    per_seed_map: Dict[str, List[IdentificationMetrics]] = {}
 
     t0 = time.perf_counter()
 
@@ -691,7 +667,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.info("Scenario: %s", label)
         logger.info("=" * 60)
 
-        sim_dirs = _resolve_sim_dirs(global_args, cfg.num_seeds, output_dir)
+        sim_dirs = _resolve_sim_dirs(global_args, cfg.num_seeds)
         attack = entry.attack_cls(
             cfg,
             workspace=output_dir / "workspace",
@@ -704,17 +680,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             logger.error("Scenario '%s' failed: %s", label, exc, exc_info=True)
             continue
 
-        result.metrics = evaluate_attack(result.deanon_results)
-        per_seed_id_metrics: List[Dict[str, Any]] = []
-        for seed_total, seed_results_group in _group_by_seed(
-            result.deanon_results
-        ):
-            per_seed_id_metrics.append(evaluate_attack(seed_results_group))
-
         results[key]      = result
         labels[key]       = label
         deanon_map[key]   = result.deanon_results
-        per_seed_map[key] = per_seed_id_metrics
+        per_seed_map[key] = result.per_seed_metrics
 
         sweeps[key] = compute_threshold_sweep(
             result.deanon_results,
@@ -759,21 +728,6 @@ def _split_results_by_group(
         group = r.group if r.group else "general"
         groups.setdefault(group, []).append(r)
     return groups
-
-
-def _group_by_seed(
-    all_results: List[DeanonymizationResult]
-) -> List[Tuple[Optional[int], List[DeanonymizationResult]]]:
-    """Best-effort split of aggregated results back into per-seed groups.
-
-    Arg:
-        all_results: Flat list of DeanonymizationResult objects.
-    """
-    groups: Dict[int, List[DeanonymizationResult]] = {}
-    for r in all_results:
-        seed = int(r.seed)
-        groups.setdefault(seed, []).append(r)
-    return [(seed, results) for seed, results in groups.items()]
 
 
 def _register_attacks() -> None:
